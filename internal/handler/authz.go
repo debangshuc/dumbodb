@@ -118,6 +118,8 @@ var commandPrivileges = map[string][]commandPrivilege{
 	"autoCompact":        {{authz.ActionCompact, scopeCluster}},
 	"currentOp":          {{authz.ActionInprog, scopeCluster}},
 	"getCmdLineOpts":     {{authz.ActionGetCmdLineOpts, scopeCluster}},
+	"replSetGetStatus":   {{authz.ActionReplSetGetStatus, scopeCluster}},
+	"replSetGetConfig":   {{authz.ActionReplSetGetConfig, scopeCluster}},
 }
 
 // authenticatedOnlyCommands need no privilege beyond being logged in: the

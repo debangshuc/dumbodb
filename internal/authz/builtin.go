@@ -39,9 +39,9 @@ var (
 	clusterMonitorActions = []Action{
 		ActionServerStatus, ActionGetParameter, ActionHostInfo,
 		ActionListDatabases, ActionTop, ActionGetLog, ActionListSessions,
-		ActionInprog, ActionGetCmdLineOpts,
+		ActionInprog, ActionGetCmdLineOpts, ActionReplSetGetStatus, ActionReplSetGetConfig,
 	}
-	clusterManagerActions   = []Action{ActionCompact, ActionSetParameter, ActionRotateCertificates}
+	clusterManagerActions   = []Action{ActionCompact, ActionSetParameter, ActionRotateCertificates, ActionReplSetGetConfig}
 	clusterMonitorDBActions = []Action{
 		ActionDBStats, ActionCollStats, ActionListCollections, ActionListIndexes,
 	}
