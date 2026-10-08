@@ -95,6 +95,23 @@ docker volume create dumbodb-data
 docker run -p 27017:27017 -v dumbodb-data:/var/lib/dumbodb dolthub/dumbodb:latest
 ```
 
+### Running as a non-root user
+
+The server runs as the unprivileged `dumbodb` user (uid/gid `999`), as `mongod`
+does in the official MongoDB image. On startup the entrypoint, still root, hands
+ownership of `/var/lib/dumbodb` to `dumbodb`, so a root-owned host directory
+works as a bind mount, and then drops privileges. Files on the host will be
+owned by uid `999`.
+
+To run under a different uid, pass `--user`; the entrypoint then changes no
+ownership, so the data directory must already be writable by that user:
+
+```bash
+docker run --user 1000:1000 -p 27017:27017 \
+  -v /path/on/host:/var/lib/dumbodb \
+  dolthub/dumbodb:latest
+```
+
 ## Version control commands
 
 DumboDB exposes Git-style operations as MongoDB `runCommand` calls

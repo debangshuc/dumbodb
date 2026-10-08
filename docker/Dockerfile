@@ -91,10 +91,41 @@ COPY --from=build-from-source /usr/local/bin/dumbodb* /usr/local/bin/
 
 RUN /usr/local/bin/dumbodb --version
 
-RUN mkdir -p /var/lib/dumbodb && chmod 755 /var/lib/dumbodb
+# The server runs as the unprivileged dumbodb user (uid/gid 999), as mongod
+# does in the official MongoDB image. The image has no USER directive: the
+# entrypoint starts as root only to hand /var/lib/dumbodb to dumbodb, which a
+# root-owned bind mount needs, then drops privileges before starting the
+# server. A container started with --user skips that step.
+RUN groupadd --gid 999 --system dumbodb && \
+    useradd --uid 999 --system --gid dumbodb --home-dir /var/lib/dumbodb dumbodb && \
+    mkdir -p /var/lib/dumbodb && \
+    chown dumbodb:dumbodb /var/lib/dumbodb && \
+    chmod 700 /var/lib/dumbodb
+
+# Inline rather than COPYed from the build context, whose layout differs
+# between release and source builds.
+COPY <<'EOF' /usr/local/bin/docker-entrypoint.sh
+#!/bin/sh
+set -e
+
+# Flags alone ("docker run dumbodb --auth") are flags for the server.
+if [ "${1#-}" != "$1" ]; then
+	set -- dumbodb "$@"
+fi
+
+if [ "$1" = "dumbodb" ] && [ "$(id -u)" = "0" ]; then
+	find -L /var/lib/dumbodb \! -user dumbodb -exec chown dumbodb:dumbodb '{}' +
+	# Lets the server keep writing logs to the container's stdout and stderr.
+	chown --dereference dumbodb "/proc/$$/fd/1" "/proc/$$/fd/2" || :
+	exec setpriv --reuid=dumbodb --regid=dumbodb --init-groups "$0" "$@"
+fi
+
+exec "$@"
+EOF
+RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
 
 VOLUME /var/lib/dumbodb
 EXPOSE 27017
 WORKDIR /var/lib/dumbodb
-ENTRYPOINT ["tini", "--", "/usr/local/bin/dumbodb"]
+ENTRYPOINT ["tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["--data-dir", "/var/lib/dumbodb", "--addr", "0.0.0.0:27017"]
