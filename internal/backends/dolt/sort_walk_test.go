@@ -99,9 +99,30 @@ func TestSortWalkMultikeyYieldsEachDocOnceAtItsExtreme(t *testing.T) {
 	}
 }
 
+func TestSortWalkMergesArrayKeys(t *testing.T) {
+	arr := func(v ...any) *types.Array { return must.NotFail(types.NewArray(v...)) }
+	c := newSortWalkCollection(t, backends.IndexInfo{Name: "k", Key: []backends.IndexKeyPair{{Field: "k"}}},
+		kDoc(1, int32(5)), kDoc(2, int32(7)),
+		kDoc(10, arr()),
+		kDoc(11, arr(arr(int32(1), int32(2)), int32(500))),
+		kDoc(12, arr(arr(int32(3)))),
+		kDoc(13, arr(int32(-5), arr())),
+	)
+	ids, sorted := sortWalkQuery(t, c, &backends.QueryParams{Sort: sortOn("k", 1)})
+	if !sorted {
+		t.Fatal("multikey index holding array keys must be walked")
+	}
+	if want := []int32{10, 0, 13, 1, 2, 11, 12}; !slices.Equal(ids, want) {
+		t.Fatalf("ascending walk = %v, want %v (empty array lowest, nested arrays by array order)", ids, want)
+	}
+	ids, _ = sortWalkQuery(t, c, &backends.QueryParams{Sort: sortOn("k", -1)})
+	if want := []int32{12, 11, 13, 2, 1, 0, 10}; !slices.Equal(ids, want) {
+		t.Fatalf("descending walk = %v, want %v", ids, want)
+	}
+}
+
 func TestSortWalkDeclines(t *testing.T) {
 	k := []backends.IndexKeyPair{{Field: "k"}}
-	arr := func(v ...any) *types.Array { return must.NotFail(types.NewArray(v...)) }
 	for _, tc := range []struct {
 		name   string
 		idx    backends.IndexInfo
@@ -110,7 +131,6 @@ func TestSortWalkDeclines(t *testing.T) {
 	}{
 		{"sparse index", backends.IndexInfo{Name: "k", Key: k, Sparse: true}, nil, &backends.QueryParams{Sort: sortOn("k", 1)}},
 		{"hidden index", backends.IndexInfo{Name: "k", Key: k, Hidden: true}, nil, &backends.QueryParams{Sort: sortOn("k", 1)}},
-		{"multikey with empty array key", backends.IndexInfo{Name: "k", Key: k}, []*types.Document{kDoc(1, arr())}, &backends.QueryParams{Sort: sortOn("k", 1)}},
 		{"hint names another index", backends.IndexInfo{Name: "k", Key: k}, nil, &backends.QueryParams{Sort: sortOn("k", 1), Hint: "_id_"}},
 		{"natural hint", backends.IndexInfo{Name: "k", Key: k}, nil, &backends.QueryParams{Sort: sortOn("k", 1), Hint: must.NotFail(types.NewDocument("$natural", int32(1)))}},
 		{"sort on unindexed field", backends.IndexInfo{Name: "k", Key: k}, nil, &backends.QueryParams{Sort: sortOn("other", 1)}},

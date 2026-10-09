@@ -97,7 +97,7 @@ func SortDocuments(docs []*types.Document, sortDoc *types.Document) error {
 			if isMeta[k] {
 				continue
 			}
-			row[k] = sortKeyValue(d, paths[k])
+			row[k] = commonpath.SortKeyValue(d, paths[k])
 		}
 		keys[di] = row
 	}
@@ -111,50 +111,6 @@ func SortDocuments(docs []*types.Document, sortDoc *types.Document) error {
 	sort.Stable(sorter)
 
 	return nil
-}
-
-// sortKeyValue returns the value d sorts by on path. When a dotted path reaches
-// several values through arrays, or a missing branch beside values, they are
-// gathered into one array so the sort takes its min or max like MongoDB.
-// Sort order treats null and a non-existent field as equivalent.
-func sortKeyValue(d *types.Document, path types.Path) any {
-	if path.Len() == 1 {
-		if v, err := d.Get(path.Prefix()); err == nil {
-			return v
-		}
-		return types.Null
-	}
-
-	vals, err := commonpath.FindValues(d, path, &commonpath.FindValuesOpts{
-		FindArrayIndex:     true,
-		FindArrayDocuments: true,
-	})
-	if err != nil {
-		return types.Null
-	}
-	missing := commonpath.HasMissingBranch(d, path)
-
-	switch {
-	case len(vals) == 0:
-		return types.Null
-	case len(vals) == 1 && !missing:
-		return vals[0]
-	}
-
-	gathered := types.MakeArray(len(vals) + 1)
-	for _, v := range vals {
-		if arr, ok := v.(*types.Array); ok {
-			for i := 0; i < arr.Len(); i++ {
-				gathered.Append(must.NotFail(arr.Get(i)))
-			}
-			continue
-		}
-		gathered.Append(v)
-	}
-	if missing {
-		gathered.Append(types.Null)
-	}
-	return gathered
 }
 
 // decoratedSorter sorts docs and the parallel keys table in lockstep, using

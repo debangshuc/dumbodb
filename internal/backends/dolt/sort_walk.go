@@ -24,6 +24,7 @@ import (
 
 	"github.com/dolthub/dumbodb/internal/backends"
 	"github.com/dolthub/dumbodb/internal/collation"
+	"github.com/dolthub/dumbodb/internal/handler/commonpath"
 	idxpkg "github.com/dolthub/dumbodb/internal/index"
 	"github.com/dolthub/dumbodb/internal/types"
 	"github.com/dolthub/dumbodb/internal/util/iterator"
@@ -65,9 +66,8 @@ func sortWalkIndex(infos []backends.IndexInfo, sortDoc *types.Document, queryCol
 
 // trySortWalk serves a single-field sort by walking the index led by the sort
 // field in sort order, fetching documents lazily so a downstream limit stops
-// the walk. It declines (false) when no index qualifies, when the query is
-// hinted onto another index, or when a multikey index holds array keys, whose
-// marker encoding does not sort where MongoDB sorts arrays.
+// the walk. It declines (false) when no index qualifies or when the query is
+// hinted onto another index.
 func (c *collection) trySortWalk(ctx context.Context, state *dbState, primary prolly.Map, params *backends.QueryParams) (types.DocumentsIterator, bool, error) {
 	if params.Collated || params.OnlyRecordIDs {
 		return nil, false, nil
@@ -86,14 +86,12 @@ func (c *collection) trySortWalk(ctx context.Context, state *dbState, primary pr
 		return nil, false, nil
 	}
 	idx, idxMap := infos[i], maps[i]
-	if idx.Multikey {
-		holdsArrays, err := idxpkg.HoldsArrayKeys(ctx, idxMap)
-		if err != nil || holdsArrays {
-			return nil, false, err
-		}
-	}
 
 	ascending := sortDirectionAscending(params.Sort)
+	path, err := types.NewPathFromString(idx.Key[0].Field)
+	if err != nil {
+		return nil, false, nil
+	}
 	var mapIter prolly.MapIter
 	if ascending {
 		mapIter, err = idxMap.IterAll(ctx)
@@ -105,15 +103,21 @@ func (c *collection) trySortWalk(ctx context.Context, state *dbState, primary pr
 	}
 
 	it := &sortWalkIter{
-		ctx:       ctx,
-		ns:        state.ns,
-		primary:   primary,
-		entries:   mapIter,
-		field:     idx.Key[0].Field,
-		ascending: ascending,
+		ctx:     ctx,
+		ns:      state.ns,
+		primary: primary,
+		entries: mapIter,
+		path:    path,
+		order:   types.Ascending,
+	}
+	if !ascending {
+		it.order = types.Descending
 	}
 	if idx.Multikey {
 		it.seen = make(map[string]struct{})
+		if err := it.loadArrayKeyDocs(idxMap); err != nil {
+			return nil, false, err
+		}
 	}
 	if state.backend != nil && state.backend.backgroundRP != nil {
 		releasePrimary := state.backend.backgroundRP.pinRoot(state.name, primary.HashOf())
@@ -135,18 +139,51 @@ type sortWalkEntry struct {
 // marker in the index, so a marker group is read whole and ordered by value.
 // For a multikey index a document is yielded at its first entry, which in an
 // ascending walk is its minimum key and in a descending walk its maximum, the
-// value MongoDB sorts it by.
+// value MongoDB sorts it by. Documents holding an array key (an empty or
+// nested array) are read up front and merged in by sort value, since one
+// array marker covers every array and an empty array sorts below all values.
 type sortWalkIter struct {
 	ctx       context.Context
 	ns        tree.NodeStore
 	primary   prolly.Map
 	entries   prolly.MapIter
-	field     string
-	ascending bool
+	path      types.Path
+	order     types.SortType
 	seen      map[string]struct{}
 	peeked    *sortWalkEntry
 	pending   []*types.Document
+	arrayDocs []*types.Document
+	walked    *types.Document
+	walkDone  bool
 	release   func()
+}
+
+// loadArrayKeyDocs reads the documents holding an array key, ordered by sort
+// value, and marks them seen so the walk skips their other entries.
+func (it *sortWalkIter) loadArrayKeyDocs(idxMap prolly.Map) error {
+	ids, err := idxpkg.ArrayKeyIDs(it.ctx, idxMap)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		doc, err := it.fetch(&sortWalkEntry{id: id})
+		if err != nil {
+			return err
+		}
+		if doc != nil {
+			it.arrayDocs = append(it.arrayDocs, doc)
+		}
+	}
+	it.sortByValue(it.arrayDocs)
+	return nil
+}
+
+func (it *sortWalkIter) sortsBefore(a, b *types.Document) bool {
+	return types.CompareOrderForSort(commonpath.SortKeyValue(a, it.path), commonpath.SortKeyValue(b, it.path), it.order) == types.Less
+}
+
+func (it *sortWalkIter) sortByValue(docs []*types.Document) {
+	sort.SliceStable(docs, func(i, j int) bool { return it.sortsBefore(docs[i], docs[j]) })
 }
 
 func (it *sortWalkIter) nextEntry() (*sortWalkEntry, error) {
@@ -195,34 +232,56 @@ func (it *sortWalkIter) fetch(e *sortWalkEntry) (*types.Document, error) {
 }
 
 func (it *sortWalkIter) Next() (struct{}, *types.Document, error) {
+	if it.walked == nil && !it.walkDone {
+		doc, err := it.nextWalked()
+		if err != nil {
+			return struct{}{}, nil, err
+		}
+		it.walked, it.walkDone = doc, doc == nil
+	}
+	if len(it.arrayDocs) > 0 && (it.walked == nil || it.sortsBefore(it.arrayDocs[0], it.walked)) {
+		doc := it.arrayDocs[0]
+		it.arrayDocs = it.arrayDocs[1:]
+		return struct{}{}, doc, nil
+	}
+	if it.walked == nil {
+		return struct{}{}, nil, iterator.ErrIteratorDone
+	}
+	doc := it.walked
+	it.walked = nil
+	return struct{}{}, doc, nil
+}
+
+// nextWalked returns the next document in index order, or nil at the end.
+func (it *sortWalkIter) nextWalked() (*types.Document, error) {
 	for {
 		if len(it.pending) > 0 {
 			doc := it.pending[0]
 			it.pending = it.pending[1:]
-			return struct{}{}, doc, nil
+			return doc, nil
 		}
 
 		e, err := it.nextEntry()
-		if err != nil {
-			return struct{}{}, nil, err
+		if err != nil || e == nil {
+			return nil, err
 		}
-		if e == nil {
-			return struct{}{}, nil, iterator.ErrIteratorDone
+		if idxpkg.LeadingKeyIsArray(e.prefix) && it.seen != nil {
+			continue
 		}
 
 		if !idxpkg.LeadingKeyMergesValues(e.prefix) {
 			doc, err := it.fetch(e)
 			if err != nil {
-				return struct{}{}, nil, err
+				return nil, err
 			}
 			if doc != nil {
-				return struct{}{}, doc, nil
+				return doc, nil
 			}
 			continue
 		}
 
 		if err := it.readMarkerGroup(e); err != nil {
-			return struct{}{}, nil, err
+			return nil, err
 		}
 	}
 }
@@ -248,13 +307,7 @@ func (it *sortWalkIter) readMarkerGroup(first *sortWalkEntry) error {
 			break
 		}
 	}
-	order := types.Ascending
-	if !it.ascending {
-		order = types.Descending
-	}
-	sort.SliceStable(group, func(i, j int) bool {
-		return types.CompareOrderForSort(indexFieldValue(group[i], it.field), indexFieldValue(group[j], it.field), order) == types.Less
-	})
+	it.sortByValue(group)
 	it.pending = group
 	return nil
 }
