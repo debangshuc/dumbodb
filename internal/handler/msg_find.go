@@ -348,6 +348,10 @@ func (h *Handler) makeFindQueryParams(ctx context.Context, params *common.FindPa
 		}
 	}
 
+	if params.Limit != 0 {
+		qp.LimitHint = params.Skip + max(params.Limit, -params.Limit)
+	}
+
 	if h.L.Enabled(ctx, slog.LevelDebug) {
 		h.L.DebugContext(ctx, fmt.Sprintf("Converted %+v for %+v to %+v.", params, cInfo, qp))
 	}

@@ -129,7 +129,21 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 
 	if !naturalHint && params != nil && params.Filter != nil && (params.Sort.Len() == 0 || fieldSort) &&
 		(!params.Collated || params.Collation != nil) {
-		if docs, used, err := c.tryIndexLookup(ctx, state, m, params.Filter, params.Hint, params.Collation); used {
+		plan, err := c.planIndexLookup(ctx, state, m, params.Filter, params.Hint, params.Collation)
+		if err != nil {
+			return nil, err
+		}
+		if plan != nil {
+			if fieldSort {
+				iter, ok, err := c.trySortWalkTrial(ctx, state, m, params, plan)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					return &backends.QueryResult{Iter: iter, Sorted: true}, nil
+				}
+			}
+			docs, err := plan.fetch(ctx, state, m)
 			if err != nil {
 				return nil, err
 			}
@@ -423,8 +437,29 @@ func (it *singleDocIter) Close() {}
 // Returns (nil, false, nil) if no suitable index was found (caller should fall
 // back to the full scan).
 func (c *collection) tryIndexLookup(ctx context.Context, state *dbState, primary prolly.Map, filter *types.Document, hint any, queryCollation *types.Document) ([]*types.Document, bool, error) {
+	plan, err := c.planIndexLookup(ctx, state, primary, filter, hint, queryCollation)
+	if err != nil || plan == nil {
+		return nil, false, err
+	}
+	docs, err := plan.fetch(ctx, state, primary)
+	return docs, true, err
+}
+
+// indexLookupPlan is a filter served by an index: the primary ids its range
+// scan matched.
+type indexLookupPlan struct {
+	index string
+	// keys is the number of index entries scanned; ids holds each matched
+	// document once.
+	keys int
+	ids  [][]byte
+}
+
+// planIndexLookup picks the index serving filter and scans its range, or
+// returns nil when no index qualifies or the range is too wide to beat a scan.
+func (c *collection) planIndexLookup(ctx context.Context, state *dbState, primary prolly.Map, filter *types.Document, hint any, queryCollation *types.Document) (*indexLookupPlan, error) {
 	if filter == nil || filter.Len() == 0 {
-		return nil, false, nil
+		return nil, nil
 	}
 
 	queryColl := collation.Parse(queryCollation)
@@ -435,10 +470,10 @@ func (c *collection) tryIndexLookup(ctx context.Context, state *dbState, primary
 	idxInfos, idxMaps, err := resolveIndexes(ctx, c, state)
 	state.mu.RUnlock()
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	if len(idxInfos) == 0 {
-		return nil, false, nil
+		return nil, nil
 	}
 
 	// A hint naming a specific index forces selection: only that index is a
@@ -486,7 +521,7 @@ func (c *collection) tryIndexLookup(ctx context.Context, state *dbState, primary
 		}
 	}
 	if len(indexedField) == 0 {
-		return nil, false, nil
+		return nil, nil
 	}
 
 	var (
@@ -503,7 +538,7 @@ func (c *collection) tryIndexLookup(ctx context.Context, state *dbState, primary
 		// Top-level $-operators ($and/$or/$nor/$comment/...) make the
 		// per-field analysis below unsound  -- bail.
 		if strings.HasPrefix(k, "$") {
-			return nil, false, nil
+			return nil, nil
 		}
 		entry, ok := indexedField[k]
 		if !ok {
@@ -545,7 +580,7 @@ func (c *collection) tryIndexLookup(ctx context.Context, state *dbState, primary
 	}
 
 	if !usable {
-		return nil, false, nil
+		return nil, nil
 	}
 
 	idxMap := idxMaps[chosenMapIdx]
@@ -558,7 +593,7 @@ func (c *collection) tryIndexLookup(ctx context.Context, state *dbState, primary
 	// the gate is essentially free for the cases where the index does win.
 	primaryCount, err := primary.Count()
 	if err != nil {
-		return nil, false, fmt.Errorf("index lookup counting primary: %w", err)
+		return nil, fmt.Errorf("index lookup counting primary: %w", err)
 	}
 	maxResults := -1
 	if primaryCount > 0 {
@@ -574,7 +609,7 @@ func (c *collection) tryIndexLookup(ctx context.Context, state *dbState, primary
 			}
 			ids, rangeExceeded, err := idxpkg.RangeLookupCapped(ctx, idxMap, r[0], r[1], remaining)
 			if err != nil {
-				return nil, false, err
+				return nil, err
 			}
 			primaryIDBytesList = append(primaryIDBytesList, ids...)
 			if rangeExceeded {
@@ -585,27 +620,34 @@ func (c *collection) tryIndexLookup(ctx context.Context, state *dbState, primary
 	} else {
 		primaryIDBytesList, exceeded, err = idxpkg.RangeLookupCapped(ctx, idxMap, startKey, stopKey, maxResults)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 	}
 	if exceeded {
 		// Caller will fall through to the sequential primary scan, which is
 		// faster than per-id point lookups for low-selectivity ranges.
-		return nil, false, nil
+		return nil, nil
 	}
 
-	// Fetch the documents from the primary map, deduplicating IDs: a
-	// multikey range yields one entry per matching array element.
+	plan := &indexLookupPlan{index: idxInfos[chosenMapIdx].Name, keys: len(primaryIDBytesList)}
 	seenIDs := make(map[string]struct{}, len(primaryIDBytesList))
-	docs := make([]*types.Document, 0, len(primaryIDBytesList))
 	for _, idBytes := range primaryIDBytesList {
 		if _, dup := seenIDs[string(idBytes)]; dup {
 			continue
 		}
 		seenIDs[string(idBytes)] = struct{}{}
+		plan.ids = append(plan.ids, idBytes)
+	}
+	return plan, nil
+}
+
+// fetch reads the plan's documents from the primary map.
+func (plan *indexLookupPlan) fetch(ctx context.Context, state *dbState, primary prolly.Map) ([]*types.Document, error) {
+	docs := make([]*types.Document, 0, len(plan.ids))
+	for _, idBytes := range plan.ids {
 		key, err := buildKey(idBytes)
 		if err != nil {
-			return nil, true, fmt.Errorf("index lookup building key: %w", err)
+			return nil, fmt.Errorf("index lookup building key: %w", err)
 		}
 		var doc *types.Document
 		if err := primary.Get(ctx, key, func(k, v val.Tuple) error {
@@ -616,14 +658,13 @@ func (c *collection) tryIndexLookup(ctx context.Context, state *dbState, primary
 			doc, decErr = readDocFromValue(ctx, state.ns, v)
 			return decErr
 		}); err != nil {
-			return nil, true, fmt.Errorf("index lookup primary fetch: %w", err)
+			return nil, fmt.Errorf("index lookup primary fetch: %w", err)
 		}
 		if doc != nil {
 			docs = append(docs, doc)
 		}
 	}
-
-	return docs, true, nil
+	return docs, nil
 }
 
 // indexPointRangesForIn returns one point range per value of a
@@ -1299,7 +1340,10 @@ func (c *collection) Explain(ctx context.Context, params *backends.ExplainParams
 	// query has a single-field non-natural sort, an index on that field
 	// can drive the scan in sorted order without a SORT stage.
 	sortByIndex := false
-	if !naturalHint && !indexPicked && params != nil && sortIsSingleField(params.Sort) {
+	if walked, ok := c.explainSortWalkTrial(ctx, params, naturalHint, indexPicked, idxInfos); ok {
+		picked = walked
+		sortByIndex = true
+	} else if !naturalHint && !indexPicked && params != nil && sortIsSingleField(params.Sort) {
 		if i, ok := sortWalkIndex(idxInfos, params.Sort, params.Collation); ok {
 			picked = idxInfos[i]
 			indexPicked = true
@@ -1369,6 +1413,28 @@ func (c *collection) Explain(ctx context.Context, params *backends.ExplainParams
 	return &backends.ExplainResult{
 		QueryPlanner: qp,
 	}, nil
+}
+
+// explainSortWalkTrial returns the sort index Query walks in place of the
+// filter's index for params, as decided by trySortWalkTrial.
+func (c *collection) explainSortWalkTrial(ctx context.Context, params *backends.ExplainParams, naturalHint, indexPicked bool, idxInfos []backends.IndexInfo) (backends.IndexInfo, bool) {
+	if naturalHint || !indexPicked || params == nil || params.Hint != nil || params.Collated || !sortIsSingleField(params.Sort) {
+		return backends.IndexInfo{}, false
+	}
+	qp := &backends.QueryParams{Filter: params.Filter, Sort: params.Sort, Collation: params.Collation}
+	if params.Limit != 0 {
+		qp.LimitHint = params.Skip + max(params.Limit, -params.Limit)
+	}
+	name, ok := c.sortWalkWinsTrial(ctx, qp)
+	if !ok {
+		return backends.IndexInfo{}, false
+	}
+	for _, idx := range idxInfos {
+		if idx.Name == name {
+			return idx, true
+		}
+	}
+	return backends.IndexInfo{}, false
 }
 
 // buildExplainPlan composes the stage tree for the given command and

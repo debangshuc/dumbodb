@@ -106,6 +106,10 @@ type QueryParams struct {
 	Sort   *types.Document
 	Limit  int64
 
+	// LimitHint is how many matching documents the caller will read, 0 when
+	// unbounded. It only informs planning; the backend does not apply it.
+	LimitHint int64
+
 	// Hint forces index selection: a name string or key-pattern document
 	// selects that index; {$natural: <int>} forces a collection scan.
 	Hint any

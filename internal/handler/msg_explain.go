@@ -48,7 +48,14 @@ func countExplainExecution(ctx context.Context, coll backends.Collection, qp *ba
 	}
 	usesIndex := planContainsIndexScan(winningPlan)
 
+	limit := int32(qp.Limit)
+	if limit < 0 {
+		limit = -limit
+	}
 	query := &backends.QueryParams{Filter: qp.Filter, Collated: qp.Collated, Collation: qp.Collation, Hint: qp.Hint}
+	if limit > 0 {
+		query.LimitHint = qp.Skip + int64(limit)
+	}
 	if qp.Sort.Len() == 1 {
 		query.Sort = qp.Sort
 	}
@@ -58,10 +65,6 @@ func countExplainExecution(ctx context.Context, coll backends.Collection, qp *ba
 	}
 	defer qres.Iter.Close()
 
-	limit := int32(qp.Limit)
-	if limit < 0 {
-		limit = -limit
-	}
 	stopAtLimit := limit > 0 && (qp.Sort.Len() == 0 || qres.Sorted)
 
 	for !stopAtLimit || nReturned < limit {

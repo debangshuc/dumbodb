@@ -16,6 +16,7 @@ package dolt
 
 import (
 	"context"
+	"errors"
 	"io"
 	"sort"
 
@@ -68,7 +69,7 @@ func sortWalkIndex(infos []backends.IndexInfo, sortDoc *types.Document, queryCol
 // field in sort order, fetching documents lazily so a downstream limit stops
 // the walk. It declines (false) when no index qualifies or when the query is
 // hinted onto another index.
-func (c *collection) trySortWalk(ctx context.Context, state *dbState, primary prolly.Map, params *backends.QueryParams) (types.DocumentsIterator, bool, error) {
+func (c *collection) trySortWalk(ctx context.Context, state *dbState, primary prolly.Map, params *backends.QueryParams) (*sortWalkIter, bool, error) {
 	if params.Collated || params.OnlyRecordIDs {
 		return nil, false, nil
 	}
@@ -103,6 +104,7 @@ func (c *collection) trySortWalk(ctx context.Context, state *dbState, primary pr
 	}
 
 	it := &sortWalkIter{
+		index:   idx.Name,
 		ctx:     ctx,
 		ns:      state.ns,
 		primary: primary,
@@ -130,6 +132,100 @@ func (c *collection) trySortWalk(ctx context.Context, state *dbState, primary pr
 	return it, true, nil
 }
 
+// sortWalkWinsTrial returns the index Query walks for params when its trial
+// prefers that walk to the index serving the filter.
+func (c *collection) sortWalkWinsTrial(ctx context.Context, params *backends.QueryParams) (string, bool) {
+	primary, exists, state, err := c.getMap(ctx)
+	if err != nil || !exists {
+		return "", false
+	}
+	plan, err := c.planIndexLookup(ctx, state, primary, params.Filter, params.Hint, params.Collation)
+	if err != nil || plan == nil {
+		return "", false
+	}
+	iter, ok, err := c.trySortWalkTrial(ctx, state, primary, params, plan)
+	if err != nil || !ok {
+		return "", false
+	}
+	iter.Close()
+	return iter.rest.index, true
+}
+
+// trialMaxResults is the result count at which MongoDB's multi-planner ends
+// its trial period.
+const trialMaxResults = 101
+
+// trySortWalkTrial races the sort walk against plan, a filter served by a
+// different index, the way MongoDB's multi-planner trial does: plan finishes
+// after scanning its keys and then emitting its sorted documents up to the
+// trial target, while the walk examines one document per step, filtering as
+// it goes. The walk wins when it reaches the target, or its end, first; the
+// documents it examined are replayed ahead of the rest of the walk.
+func (c *collection) trySortWalkTrial(ctx context.Context, state *dbState, primary prolly.Map, params *backends.QueryParams, plan *indexLookupPlan) (*replayIter, bool, error) {
+	if params.Hint != nil {
+		return nil, false, nil
+	}
+	walk, ok, err := c.trySortWalk(ctx, state, primary, params)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	if walk.index == plan.index {
+		walk.Close()
+		return nil, false, nil
+	}
+
+	target := trialMaxResults
+	if params.LimitHint > 0 && params.LimitHint < trialMaxResults {
+		target = int(params.LimitHint)
+	}
+	planSteps := plan.keys + 1 + min(len(plan.ids), target)
+
+	var examined []*types.Document
+	matched := 0
+	for len(examined)+1 < planSteps {
+		_, doc, err := walk.Next()
+		if errors.Is(err, iterator.ErrIteratorDone) {
+			return &replayIter{docs: examined, rest: walk}, true, nil
+		}
+		if err != nil {
+			walk.Close()
+			return nil, false, err
+		}
+		examined = append(examined, doc)
+		match, err := backends.MatchPartialFilter(doc, params.Filter)
+		if err != nil {
+			walk.Close()
+			return nil, false, nil
+		}
+		if match {
+			if matched++; matched == target {
+				return &replayIter{docs: examined, rest: walk}, true, nil
+			}
+		}
+	}
+	walk.Close()
+	return nil, false, nil
+}
+
+// replayIter yields docs, then the rest of the iterator they were read from.
+type replayIter struct {
+	docs []*types.Document
+	rest *sortWalkIter
+}
+
+func (it *replayIter) Next() (struct{}, *types.Document, error) {
+	if len(it.docs) > 0 {
+		doc := it.docs[0]
+		it.docs = it.docs[1:]
+		return struct{}{}, doc, nil
+	}
+	return it.rest.Next()
+}
+
+func (it *replayIter) Close() {
+	it.rest.Close()
+}
+
 type sortWalkEntry struct {
 	prefix []byte
 	id     []byte
@@ -143,6 +239,7 @@ type sortWalkEntry struct {
 // nested array) are read up front and merged in by sort value, since one
 // array marker covers every array and an empty array sorts below all values.
 type sortWalkIter struct {
+	index     string
 	ctx       context.Context
 	ns        tree.NodeStore
 	primary   prolly.Map

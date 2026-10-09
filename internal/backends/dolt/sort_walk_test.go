@@ -146,3 +146,62 @@ func TestSortWalkDeclines(t *testing.T) {
 		})
 	}
 }
+
+// newSortVsFilterCollection holds docs 1..n with k = (i*7) mod n, p = i mod 3
+// and q = i, indexed on each field.
+func newSortVsFilterCollection(t *testing.T, n int32) backends.Collection {
+	t.Helper()
+	c := newSortWalkCollection(t, backends.IndexInfo{Name: "k", Key: []backends.IndexKeyPair{{Field: "k"}}})
+	var docs []*types.Document
+	for i := int32(1); i <= n; i++ {
+		docs = append(docs, must.NotFail(types.NewDocument("_id", i, "k", (i*7)%n, "p", i%3, "q", i)))
+	}
+	if _, err := c.InsertAll(context.Background(), &backends.InsertAllParams{Docs: docs}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateIndexes(context.Background(), &backends.CreateIndexesParams{Indexes: []backends.IndexInfo{
+		{Name: "p", Key: []backends.IndexKeyPair{{Field: "p"}}},
+		{Name: "q", Key: []backends.IndexKeyPair{{Field: "q"}}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func TestSortWalkTrialAgainstFilterIndex(t *testing.T) {
+	c := newSortVsFilterCollection(t, 3000)
+	for _, tc := range []struct {
+		name       string
+		filter     *types.Document
+		limit      int64
+		hint       any
+		wantWalked bool
+	}{
+		{"unselective filter with limit walks", must.NotFail(types.NewDocument("p", int32(1))), 5, nil, true},
+		{"unselective filter without limit walks", must.NotFail(types.NewDocument("p", int32(1))), 0, nil, true},
+		{"selective filter uses its index", must.NotFail(types.NewDocument("q", int32(7))), 5, nil, false},
+		{"moderate filter without limit uses its index", must.NotFail(types.NewDocument("q", must.NotFail(types.NewDocument("$lt", int32(300))))), 0, nil, false},
+		{"empty filter range uses its index", must.NotFail(types.NewDocument("q", int32(-1))), 5, nil, false},
+		{"hint on the filter index skips the trial", must.NotFail(types.NewDocument("p", int32(1))), 5, "p", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ids, sorted := sortWalkQuery(t, c, &backends.QueryParams{Filter: tc.filter, Sort: sortOn("k", 1), LimitHint: tc.limit, Hint: tc.hint})
+			if sorted != tc.wantWalked {
+				t.Fatalf("walked = %v, want %v", sorted, tc.wantWalked)
+			}
+			if !sorted {
+				return
+			}
+			// The walk returns every document in k order, the trial's
+			// examined documents first; the caller filters.
+			if len(ids) != 3001 {
+				t.Fatalf("walk returned %d documents, want 3001", len(ids))
+			}
+			for i := 1; i < len(ids); i++ {
+				if prev, cur := (ids[i-1]*7)%3000, (ids[i]*7)%3000; ids[i-1] != 0 && prev > cur {
+					t.Fatalf("walk out of k order at %d: %v", i, ids[:i+1])
+				}
+			}
+		})
+	}
+}

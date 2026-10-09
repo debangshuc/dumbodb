@@ -532,6 +532,7 @@ func (h *Handler) MsgAggregate(connCtx context.Context, msg *wire.OpMsg) (*wire.
 		if qp.Sort != nil && qp.Sort.Keys()[0] != "$natural" {
 			sortStage = stagesDocuments[pushdownSortStageIndex(aggregationStages)]
 		}
+		qp.LimitHint = pushdownLimit(aggregationStages)
 
 		if hint, _ := document.Get("hint"); hint != nil {
 			qp.Hint = hint
