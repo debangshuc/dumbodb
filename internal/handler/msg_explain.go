@@ -285,6 +285,7 @@ func (h *Handler) MsgExplain(connCtx context.Context, msg *wire.OpMsg) (*wire.Op
 
 	if params.Aggregate {
 		params.Filter, params.Sort = aggregations.GetPushdownQuery(params.StagesDocs)
+		params.Limit = pushdownLimit(params.StagesDocs)
 	}
 
 	if !h.DisablePushdown {
