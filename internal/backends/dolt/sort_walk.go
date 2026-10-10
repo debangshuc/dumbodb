@@ -15,6 +15,7 @@
 package dolt
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -140,7 +141,7 @@ func (c *collection) sortWalkWinsTrial(ctx context.Context, params *backends.Que
 	if err != nil || !exists {
 		return "", false
 	}
-	plan, err := c.planIndexLookup(ctx, state, primary, params.Filter, params.Hint, params.Collation)
+	plan, err := c.planIndexLookup(ctx, state, primary, params.Filter, params.Hint, params.Collation, false)
 	if err != nil || plan == nil {
 		return "", false
 	}
@@ -422,7 +423,44 @@ func (it *sortWalkIter) Close() {
 // for a scan indexScanSortOrder found to yield sort order, so a downstream
 // limit stops the fetches.
 func (plan *indexLookupPlan) sortedIter(ctx context.Context, state *dbState, primary prolly.Map, sortDoc *types.Document, reverse bool) types.DocumentsIterator {
-	ids := plan.ids
+	return newPlanSortedIter(ctx, state, primary, plan.ids, sortDoc, reverse)
+}
+
+// keySortedIter yields the plan's documents in sortDoc's order by sorting its
+// entries on their encoded value at index position pos, so a document is
+// fetched only when read. An entry whose values do not split is ordered by its
+// fetched document's value, encoded the same way.
+func (plan *indexLookupPlan) keySortedIter(ctx context.Context, state *dbState, primary prolly.Map, sortDoc *types.Document, pos int) (types.DocumentsIterator, error) {
+	path := must.NotFail(types.NewPathFromString(sortDoc.Keys()[0]))
+	sortKeys := make([][]byte, len(plan.ids))
+	for i, values := range plan.values {
+		if split, ok := idxpkg.SplitKeyValues(values, len(plan.info.Key)); ok {
+			sortKeys[i] = split[pos]
+			continue
+		}
+		doc, err := lookupDocFromPrimary(ctx, primary, state.ns, plan.ids[i])
+		if err != nil {
+			return nil, err
+		}
+		if doc != nil {
+			sortKeys[i] = idxpkg.EncodeValue(commonpath.SortKeyValue(doc, path))
+		}
+	}
+	order := make([]int, len(plan.ids))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortStableFunc(order, func(a, b int) int { return bytes.Compare(sortKeys[a], sortKeys[b]) })
+	ids := make([][]byte, len(order))
+	for i, o := range order {
+		ids[i] = plan.ids[o]
+	}
+	return newPlanSortedIter(ctx, state, primary, ids, sortDoc, !sortDirectionAscending(sortDoc)), nil
+}
+
+// newPlanSortedIter yields the documents of ids, which are in ascending sort
+// order, in sortDoc's order: backward when reverse.
+func newPlanSortedIter(ctx context.Context, state *dbState, primary prolly.Map, ids [][]byte, sortDoc *types.Document, reverse bool) types.DocumentsIterator {
 	if reverse {
 		ids = slices.Clone(ids)
 		slices.Reverse(ids)

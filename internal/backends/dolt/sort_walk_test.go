@@ -266,3 +266,48 @@ func insertFiller(t *testing.T, c backends.Collection, n int32) {
 		}
 	}
 }
+
+func TestIndexKeysSortedBeforeFetch(t *testing.T) {
+	doc := func(id, grp int32, k any) *types.Document {
+		return must.NotFail(types.NewDocument("_id", id, "grp", grp, "k", k))
+	}
+	sub := func(x int32) *types.Document { return must.NotFail(types.NewDocument("x", x)) }
+	c := newSortWalkCollection(t, backends.IndexInfo{Name: "grp_k", Key: []backends.IndexKeyPair{{Field: "grp"}, {Field: "k"}}},
+		doc(1, 2, int32(30)), doc(2, 3, 2.5), doc(3, 2, int32(-4)), doc(4, 3, "s"), doc(5, 2, sub(2)),
+		doc(6, 3, sub(1)), doc(7, 1, int32(0)), doc(8, 3, 2.25), doc(9, 2, int32(3)),
+	)
+	insertFiller(t, c, 20)
+	gte2 := must.NotFail(types.NewDocument("grp", must.NotFail(types.NewDocument("$gte", int32(2)))))
+
+	ids, sorted := sortWalkQuery(t, c, &backends.QueryParams{Filter: gte2, Sort: sortOn("k", 1)})
+	if !sorted {
+		t.Fatal("a range prefix scan is sorted on its keys")
+	}
+	if want := []int32{3, 8, 2, 9, 1, 4, 6, 5}; !slices.Equal(ids, want) {
+		t.Fatalf("ascending = %v, want %v", ids, want)
+	}
+	ids, _ = sortWalkQuery(t, c, &backends.QueryParams{Filter: gte2, Sort: sortOn("k", -1)})
+	if want := []int32{5, 6, 4, 1, 9, 2, 8, 3}; !slices.Equal(ids, want) {
+		t.Fatalf("descending = %v, want %v", ids, want)
+	}
+
+	res, err := c.Query(context.Background(), &backends.QueryParams{Filter: gte2, Sort: sortOn("k", 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs := queryExecutorCounters.docs.Load()
+	for range 2 {
+		if _, _, err := res.Iter.Next(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res.Iter.Close()
+	if read := queryExecutorCounters.docs.Load() - docs; read != 2 {
+		t.Fatalf("reading 2 sorted documents fetched %d", read)
+	}
+
+	residual := must.NotFail(types.NewDocument("grp", must.NotFail(types.NewDocument("$gte", int32(2))), "other", int32(1)))
+	if _, sorted := sortWalkQuery(t, c, &backends.QueryParams{Filter: residual, Sort: sortOn("k", 1)}); sorted {
+		t.Fatal("a filter field outside the index is decided after the fetch; the keys cannot be sorted first")
+	}
+}

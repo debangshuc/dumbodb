@@ -56,6 +56,7 @@ package index
 import (
 	"encoding/binary"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/dolthub/dumbodb/internal/types"
@@ -371,6 +372,107 @@ func appendFraction(out []byte, frac float64) []byte {
 	var b [8]byte
 	binary.BigEndian.PutUint64(b[:], math.Float64bits(frac))
 	return append(out, b[:]...)
+}
+
+// SplitKeyValues splits key, the concatenated encodings of n index values, into
+// each value's encoding. ok is false when key does not split exactly one way:
+// a BinData value before the last does not mark its end, and a number's
+// optional fraction can, rarely, also parse as the next value.
+func SplitKeyValues(key []byte, n int) (values [][]byte, ok bool) {
+	var found [][]byte
+	solutions := 0
+	var split func(rest []byte, acc [][]byte)
+	split = func(rest []byte, acc [][]byte) {
+		if solutions > 1 {
+			return
+		}
+		if len(acc) == n-1 {
+			if valueEncodingFits(rest) {
+				solutions++
+				found = append(slices.Clone(acc), rest)
+			}
+			return
+		}
+		for _, l := range valueEncodingLengths(rest) {
+			split(rest[l:], append(acc, rest[:l]))
+		}
+	}
+	if n > 0 {
+		split(key, nil)
+	}
+	return found, solutions == 1
+}
+
+// valueEncodingLengths returns the possible lengths of the value encoding that
+// begins b: none when b does not start with one or its end is unmarked, two
+// for a number that may carry a fraction.
+func valueEncodingLengths(b []byte) []int {
+	if len(b) == 0 {
+		return nil
+	}
+	fixed := func(l int) []int {
+		if len(b) < l {
+			return nil
+		}
+		return []int{l}
+	}
+	number := func(l int) []int {
+		switch {
+		case len(b) >= l+8:
+			return []int{l, l + 8}
+		case len(b) >= l:
+			return []int{l}
+		}
+		return nil
+	}
+	switch c := b[0]; {
+	case c == ctypeMinKey, c == ctypeNull, c == ctypeNaN, c == ctypeNegInf, c == ctypeZero, c == ctypePosInf,
+		c == ctypeObject, c == ctypeArray, c == ctypeBoolFalse, c == ctypeBoolTrue, c == ctypeMaxKey:
+		return []int{1}
+	case c >= ctypeNegInf+1 && c <= ctypeNegMedium:
+		return number(1 + int(ctypeNegMedium-c) + 1)
+	case c >= ctypePosMedium && c <= ctypePosMedium+7:
+		return number(1 + int(c-ctypePosMedium) + 1)
+	case c == ctypeString:
+		if l, ok := escapedEnd(b, 1); ok {
+			return []int{l}
+		}
+	case c == ctypeRegex:
+		if l, ok := escapedEnd(b, 1); ok {
+			if l, ok = escapedEnd(b, l); ok {
+				return []int{l}
+			}
+		}
+	case c == ctypeOID:
+		return fixed(13)
+	case c == ctypeDate, c == ctypeTimestamp:
+		return fixed(9)
+	}
+	return nil
+}
+
+// valueEncodingFits reports whether b is exactly one value encoding.
+func valueEncodingFits(b []byte) bool {
+	if len(b) > 0 && b[0] == ctypeBinData {
+		return len(b) >= 2
+	}
+	return slices.Contains(valueEncodingLengths(b), len(b))
+}
+
+// escapedEnd returns the offset just past the 0x00 terminator of the escaped
+// string starting at b[from], where 0x00 0xFF is an escaped zero byte.
+func escapedEnd(b []byte, from int) (int, bool) {
+	for i := from; i < len(b); i++ {
+		if b[i] != 0x00 {
+			continue
+		}
+		if i+1 < len(b) && b[i+1] == 0xFF {
+			i++
+			continue
+		}
+		return i + 1, true
+	}
+	return 0, false
 }
 
 // BracketRange returns the [start, stop) KeyString range of v's

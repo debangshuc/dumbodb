@@ -180,7 +180,7 @@ func boundTuple(key []byte) (val.Tuple, error) {
 // on that side. Iteration uses prolly.Map.IterKeyRange so only the relevant
 // chunks of the secondary index are touched.
 func RangeLookup(ctx context.Context, m prolly.Map, startKey, stopKey []byte) ([][]byte, error) {
-	results, _, err := rangeLookupCapped(ctx, m, startKey, stopKey, -1)
+	results, _, _, err := rangeLookupCapped(ctx, m, startKey, stopKey, -1, false)
 	return results, err
 }
 
@@ -193,32 +193,39 @@ func RangeLookup(ctx context.Context, m prolly.Map, startKey, stopKey []byte) ([
 // every document) doesn't pay the full scan-then-point-fetch cost just to
 // end up worse than a sequential primary scan.
 func RangeLookupCapped(ctx context.Context, m prolly.Map, startKey, stopKey []byte, maxResults int) (results [][]byte, exceeded bool, err error) {
-	return rangeLookupCapped(ctx, m, startKey, stopKey, maxResults)
+	results, _, exceeded, err = rangeLookupCapped(ctx, m, startKey, stopKey, maxResults, false)
+	return results, exceeded, err
 }
 
-func rangeLookupCapped(ctx context.Context, m prolly.Map, startKey, stopKey []byte, maxResults int) ([][]byte, bool, error) {
+// RangeEntriesCapped is RangeLookupCapped also returning, for each id, the
+// entry's encoded index values (its key without the trailing id).
+func RangeEntriesCapped(ctx context.Context, m prolly.Map, startKey, stopKey []byte, maxResults int) (ids, values [][]byte, exceeded bool, err error) {
+	return rangeLookupCapped(ctx, m, startKey, stopKey, maxResults, true)
+}
+
+func rangeLookupCapped(ctx context.Context, m prolly.Map, startKey, stopKey []byte, maxResults int, keepValues bool) ([][]byte, [][]byte, bool, error) {
 	startTup, err := boundTuple(startKey)
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
 	stopTup, err := boundTuple(stopKey)
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
 
 	iter, err := m.IterKeyRange(ctx, startTup, stopTup)
 	if err != nil {
-		return nil, false, fmt.Errorf("index: iterating secondary index range: %w", err)
+		return nil, nil, false, fmt.Errorf("index: iterating secondary index range: %w", err)
 	}
 
-	var results [][]byte
+	var results, values [][]byte
 	for {
 		k, _, err := iter.Next(ctx)
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
-			return nil, false, fmt.Errorf("index: reading secondary index: %w", err)
+			return nil, nil, false, fmt.Errorf("index: reading secondary index: %w", err)
 		}
 		if k == nil {
 			break
@@ -246,13 +253,16 @@ func rangeLookupCapped(ctx context.Context, m prolly.Map, startKey, stopKey []by
 		idCopy := make([]byte, primaryIDLen)
 		copy(idCopy, compositeKey[idStart:])
 		results = append(results, idCopy)
+		if keepValues {
+			values = append(values, bytes.Clone(compositeKey[:idStart-1]))
+		}
 
 		if maxResults >= 0 && len(results) > maxResults {
-			return nil, true, nil
+			return nil, nil, true, nil
 		}
 	}
 
-	return results, false, nil
+	return results, values, false, nil
 }
 
 // RangeCount returns the number of secondary index entries whose composite
