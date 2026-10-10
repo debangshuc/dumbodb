@@ -644,6 +644,8 @@ func (b *Backend) Status(ctx context.Context, params *backends.StatusParams) (*b
 
 	return &backends.StatusResult{
 		CountCollections: totalCollections,
+		ScannedKeys:      queryExecutorCounters.keys.Load(),
+		ScannedDocuments: queryExecutorCounters.docs.Load(),
 	}, nil
 }
 

@@ -263,6 +263,7 @@ func (it *sortWalkIter) loadArrayKeyDocs(idxMap prolly.Map) error {
 	if err != nil {
 		return err
 	}
+	countKeysExamined(len(ids))
 	for _, id := range ids {
 		doc, err := it.fetch(&sortWalkEntry{id: id})
 		if err != nil {
@@ -300,6 +301,7 @@ func (it *sortWalkIter) nextEntry() (*sortWalkEntry, error) {
 		if err != nil {
 			return nil, err
 		}
+		countKeysExamined(1)
 		composite, ok := keyDesc.GetBytes(0, k)
 		if !ok || len(composite) < primaryIDLen+1 {
 			continue

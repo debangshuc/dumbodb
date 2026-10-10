@@ -379,6 +379,8 @@ func pointLookupByID(ctx context.Context, ns tree.NodeStore, m prolly.Map, idVal
 		if v == nil {
 			return nil
 		}
+		countKeysExamined(1)
+		countDocsExamined(1)
 
 		keyBytes, ok := keyDesc.GetBytes(0, k)
 		if !ok {
@@ -632,8 +634,10 @@ func (c *collection) planIndexLookup(ctx context.Context, state *dbState, primar
 	if exceeded {
 		// Caller will fall through to the sequential primary scan, which is
 		// faster than per-id point lookups for low-selectivity ranges.
+		countKeysExamined(maxResults + 1)
 		return nil, nil
 	}
+	countKeysExamined(len(primaryIDBytesList))
 
 	plan := &indexLookupPlan{info: idxInfos[chosenMapIdx], index: idxInfos[chosenMapIdx].Name, keys: len(primaryIDBytesList)}
 	seenIDs := make(map[string]struct{}, len(primaryIDBytesList))
@@ -660,6 +664,7 @@ func (plan *indexLookupPlan) fetch(ctx context.Context, state *dbState, primary 
 			if v == nil {
 				return nil
 			}
+			countDocsExamined(1)
 			var decErr error
 			doc, decErr = readDocFromValue(ctx, state.ns, v)
 			return decErr
@@ -2611,6 +2616,7 @@ func (c *collection) tryIndexedCount(ctx context.Context, state *dbState, filter
 	if err != nil {
 		return 0, false, err
 	}
+	countKeysExamined(int(n))
 	return n, true, nil
 }
 
@@ -2812,6 +2818,7 @@ func scanDistinctFromIndex(
 			break
 		}
 
+		countKeysExamined(1)
 		composite, ok := idxKeyDesc.GetBytes(0, k)
 		if !ok {
 			continue
@@ -2867,6 +2874,7 @@ func lookupDocFromPrimary(
 		if v == nil {
 			return nil
 		}
+		countDocsExamined(1)
 		d, decErr := readDocFromValue(ctx, ns, v)
 		if decErr != nil {
 			return decErr
@@ -3688,6 +3696,7 @@ func (it *mapIter) Next() (struct{}, *types.Document, error) {
 		if v == nil {
 			return struct{}{}, nil, iterator.ErrIteratorDone
 		}
+		countDocsExamined(1)
 
 		keyBytes, ok := keyDesc.GetBytes(0, k)
 		if !ok {
