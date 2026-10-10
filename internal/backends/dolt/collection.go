@@ -134,6 +134,9 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 			return nil, err
 		}
 		if plan != nil {
+			if reverse, ok := indexScanSortOrder(plan.info, params.Filter, params.Sort, params.Collation); fieldSort && ok {
+				return &backends.QueryResult{Iter: plan.sortedIter(ctx, state, m, params.Sort, reverse), Sorted: true}, nil
+			}
 			if fieldSort {
 				iter, ok, err := c.trySortWalkTrial(ctx, state, m, params, plan)
 				if err != nil {
@@ -446,8 +449,9 @@ func (c *collection) tryIndexLookup(ctx context.Context, state *dbState, primary
 }
 
 // indexLookupPlan is a filter served by an index: the primary ids its range
-// scan matched.
+// scan matched, in index order.
 type indexLookupPlan struct {
+	info  backends.IndexInfo
 	index string
 	// keys is the number of index entries scanned; ids holds each matched
 	// document once.
@@ -551,6 +555,8 @@ func (c *collection) planIndexLookup(ctx context.Context, state *dbState, primar
 		if queryCmp == nil && !entry.compound {
 			if ranges, ok := indexPointRangesForIn(v); ok {
 				chosenMapIdx = entry.mapIdx
+				// Scan the points in key order so ids come back in index order.
+				slices.SortFunc(ranges, func(a, b [2][]byte) int { return bytes.Compare(a[0], b[0]) })
 				pointRanges = ranges
 				usable = true
 				break
@@ -629,7 +635,7 @@ func (c *collection) planIndexLookup(ctx context.Context, state *dbState, primar
 		return nil, nil
 	}
 
-	plan := &indexLookupPlan{index: idxInfos[chosenMapIdx].Name, keys: len(primaryIDBytesList)}
+	plan := &indexLookupPlan{info: idxInfos[chosenMapIdx], index: idxInfos[chosenMapIdx].Name, keys: len(primaryIDBytesList)}
 	seenIDs := make(map[string]struct{}, len(primaryIDBytesList))
 	for _, idBytes := range primaryIDBytesList {
 		if _, dup := seenIDs[string(idBytes)]; dup {
@@ -1350,31 +1356,7 @@ func (c *collection) Explain(ctx context.Context, params *backends.ExplainParams
 			sortByIndex = true
 		}
 	} else if indexPicked && params != nil && sortIsSingleField(params.Sort) {
-		// Filter-driven pick: the sort is free whenever the sort key is
-		// one of the index's key fields AND every earlier key field is
-		// bound by an equality predicate in the filter (so the scan
-		// emits each remaining suffix in index order). Direction must
-		// agree with the index (ascending sort vs ascending key, etc.).
-		// A multikey index's bounded scan can't yield sort order: a document
-		// sorts by its min or max element, not the element the bounds matched.
-		sortField := params.Sort.Keys()[0]
-		sortAsc := sortDirectionAscending(params.Sort)
-		for pos, k := range picked.Key {
-			if picked.Multikey {
-				break
-			}
-			if k.Field != sortField {
-				continue
-			}
-			if k.Descending == sortAsc {
-				break
-			}
-			if !filterBindsEqualityPrefix(params.Filter, picked.Key[:pos]) {
-				break
-			}
-			sortByIndex = true
-			break
-		}
+		_, sortByIndex = indexScanSortOrder(picked, params.Filter, params.Sort, params.Collation)
 	}
 
 	if indexPicked && params != nil && !picked.Multikey {
@@ -1640,6 +1622,33 @@ func filterBindsEqualityPrefix(filter *types.Document, keys []backends.IndexKeyP
 		}
 	}
 	return true
+}
+
+// indexScanSortOrder reports whether a scan of idx bounded by filter yields
+// documents in sort order, forward or, when reverse, backward: the sort field
+// is an index key, every key before it is bound by equality, the index is not
+// multikey (a document sorts by its min or max element, not the one the bounds
+// matched), and both orders are binary. Entries are stored ascending whatever
+// the key's direction, so a descending sort scans backward.
+func indexScanSortOrder(idx backends.IndexInfo, filter, sort, queryCollation *types.Document) (reverse, ok bool) {
+	if idx.Multikey || !sortIsSingleField(sort) || !collation.Parse(queryCollation).IsSimple() || !collation.Parse(idx.Collation).IsSimple() {
+		return false, false
+	}
+	switch must.NotFail(sort.Get(sort.Keys()[0])).(type) {
+	case int32, int64, float64:
+	default:
+		return false, false
+	}
+	for pos, k := range idx.Key {
+		if k.Field != sort.Keys()[0] {
+			continue
+		}
+		if !filterBindsEqualityPrefix(filter, idx.Key[:pos]) {
+			return false, false
+		}
+		return !sortDirectionAscending(sort), true
+	}
+	return false, false
 }
 
 // valueIsScalarEquality reports whether v is a bare scalar OR a single

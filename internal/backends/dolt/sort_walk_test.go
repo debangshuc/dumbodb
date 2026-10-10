@@ -134,9 +134,6 @@ func TestSortWalkDeclines(t *testing.T) {
 		{"hint names another index", backends.IndexInfo{Name: "k", Key: k}, nil, &backends.QueryParams{Sort: sortOn("k", 1), Hint: "_id_"}},
 		{"natural hint", backends.IndexInfo{Name: "k", Key: k}, nil, &backends.QueryParams{Sort: sortOn("k", 1), Hint: must.NotFail(types.NewDocument("$natural", int32(1)))}},
 		{"sort on unindexed field", backends.IndexInfo{Name: "k", Key: k}, nil, &backends.QueryParams{Sort: sortOn("other", 1)}},
-		{"filter served by an index", backends.IndexInfo{Name: "k", Key: k}, []*types.Document{kDoc(1, int32(1))}, &backends.QueryParams{
-			Filter: must.NotFail(types.NewDocument("k", int32(1))), Sort: sortOn("k", 1),
-		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newSortWalkCollection(t, tc.idx, tc.docs...)
@@ -203,5 +200,69 @@ func TestSortWalkTrialAgainstFilterIndex(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestIndexScanInSortOrder(t *testing.T) {
+	doc := func(id, grp int32, k any) *types.Document {
+		return must.NotFail(types.NewDocument("_id", id, "grp", grp, "k", k))
+	}
+	sub := func(x int32) *types.Document { return must.NotFail(types.NewDocument("x", x)) }
+	c := newSortWalkCollection(t, backends.IndexInfo{Name: "grp_k", Key: []backends.IndexKeyPair{{Field: "grp"}, {Field: "k", Descending: true}}},
+		doc(1, 1, int32(30)), doc(2, 1, int32(10)), doc(3, 2, int32(5)), doc(4, 1, int32(20)),
+		doc(5, 1, sub(2)), doc(6, 1, sub(1)), doc(7, 2, sub(0)),
+	)
+	insertFiller(t, c, 20)
+	grp1 := must.NotFail(types.NewDocument("grp", int32(1)))
+	ids, sorted := sortWalkQuery(t, c, &backends.QueryParams{Filter: grp1, Sort: sortOn("k", 1)})
+	if !sorted {
+		t.Fatal("an equality prefix scan yields the next key in order")
+	}
+	if want := []int32{2, 4, 1, 6, 5}; !slices.Equal(ids, want) {
+		t.Fatalf("ascending = %v, want %v (subdocuments ordered by value)", ids, want)
+	}
+	ids, _ = sortWalkQuery(t, c, &backends.QueryParams{Filter: grp1, Sort: sortOn("k", -1)})
+	if want := []int32{5, 6, 1, 4, 2}; !slices.Equal(ids, want) {
+		t.Fatalf("descending = %v, want %v", ids, want)
+	}
+
+	in := must.NotFail(types.NewDocument("grp", must.NotFail(types.NewDocument("$in", must.NotFail(types.NewArray(int32(1), int32(2)))))))
+	if _, sorted := sortWalkQuery(t, c, &backends.QueryParams{Filter: in, Sort: sortOn("k", 1)}); sorted {
+		t.Fatal("$in on the prefix spans several prefixes; the scan is not in k order")
+	}
+}
+
+func TestIndexScanInSortOrderOnSortField(t *testing.T) {
+	c := newSortWalkCollection(t, backends.IndexInfo{Name: "k", Key: []backends.IndexKeyPair{{Field: "k"}}},
+		kDoc(1, int32(30)), kDoc(2, int32(10)), kDoc(3, int32(20)), kDoc(4, int32(40)),
+	)
+	insertFiller(t, c, 20)
+	in := must.NotFail(types.NewDocument("k", must.NotFail(types.NewDocument("$in", must.NotFail(types.NewArray(int32(40), int32(10), int32(30)))))))
+	ids, sorted := sortWalkQuery(t, c, &backends.QueryParams{Filter: in, Sort: sortOn("k", 1)})
+	if !sorted {
+		t.Fatal("$in points scanned in key order yield sort order")
+	}
+	if want := []int32{2, 1, 4}; !slices.Equal(ids, want) {
+		t.Fatalf("$in ascending = %v, want %v", ids, want)
+	}
+
+	arr := func(v ...any) *types.Array { return must.NotFail(types.NewArray(v...)) }
+	if err := insertDottedPathDoc(c, kDoc(5, arr(int32(15), int32(50)))); err != nil {
+		t.Fatal(err)
+	}
+	gt := must.NotFail(types.NewDocument("k", must.NotFail(types.NewDocument("$gt", int32(12)))))
+	if _, sorted := sortWalkQuery(t, c, &backends.QueryParams{Filter: gt, Sort: sortOn("k", 1)}); sorted {
+		t.Fatal("a multikey range scan is not in sort order")
+	}
+}
+
+// insertFiller adds n documents lacking the indexed fields, so test filters
+// stay under the planner's half-the-collection cap.
+func insertFiller(t *testing.T, c backends.Collection, n int32) {
+	t.Helper()
+	for i := int32(0); i < n; i++ {
+		if err := insertDottedPathDoc(c, must.NotFail(types.NewDocument("_id", 1000+i))); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

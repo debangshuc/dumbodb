@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"sort"
 
 	"github.com/dolthub/dolt/go/store/prolly"
@@ -410,6 +411,116 @@ func (it *sortWalkIter) readMarkerGroup(first *sortWalkEntry) error {
 }
 
 func (it *sortWalkIter) Close() {
+	if it.release != nil {
+		it.release()
+	}
+}
+
+// sortedIter fetches the plan's documents lazily in index order, or reversed,
+// for a scan indexScanSortOrder found to yield sort order, so a downstream
+// limit stops the fetches.
+func (plan *indexLookupPlan) sortedIter(ctx context.Context, state *dbState, primary prolly.Map, sortDoc *types.Document, reverse bool) types.DocumentsIterator {
+	ids := plan.ids
+	if reverse {
+		ids = slices.Clone(ids)
+		slices.Reverse(ids)
+	}
+	it := &planSortedIter{
+		ctx:     ctx,
+		ns:      state.ns,
+		primary: primary,
+		ids:     ids,
+		path:    must.NotFail(types.NewPathFromString(sortDoc.Keys()[0])),
+		order:   types.Ascending,
+	}
+	if !sortDirectionAscending(sortDoc) {
+		it.order = types.Descending
+	}
+	if state.backend != nil && state.backend.backgroundRP != nil {
+		it.release = state.backend.backgroundRP.pinRoot(state.name, primary.HashOf())
+	}
+	return it
+}
+
+// planSortedIter yields documents in id order. Subdocument sort values share
+// one index key, so a run of them is read whole and ordered by value.
+type planSortedIter struct {
+	ctx     context.Context
+	ns      tree.NodeStore
+	primary prolly.Map
+	ids     [][]byte
+	path    types.Path
+	order   types.SortType
+	peeked  *types.Document
+	pending []*types.Document
+	release func()
+}
+
+func (it *planSortedIter) nextFetched() (*types.Document, error) {
+	if it.peeked != nil {
+		doc := it.peeked
+		it.peeked = nil
+		return doc, nil
+	}
+	for len(it.ids) > 0 {
+		id := it.ids[0]
+		it.ids = it.ids[1:]
+		doc, err := lookupDocFromPrimary(it.ctx, it.primary, it.ns, id)
+		if err != nil {
+			return nil, err
+		}
+		if doc != nil {
+			doc.SetRecordID(keyBytesToRecordID(id))
+			return doc, nil
+		}
+	}
+	return nil, nil
+}
+
+func (it *planSortedIter) isSubdocument(doc *types.Document) bool {
+	_, ok := commonpath.SortKeyValue(doc, it.path).(*types.Document)
+	return ok
+}
+
+func (it *planSortedIter) Next() (struct{}, *types.Document, error) {
+	if len(it.pending) > 0 {
+		doc := it.pending[0]
+		it.pending = it.pending[1:]
+		return struct{}{}, doc, nil
+	}
+	doc, err := it.nextFetched()
+	if err != nil {
+		return struct{}{}, nil, err
+	}
+	if doc == nil {
+		return struct{}{}, nil, iterator.ErrIteratorDone
+	}
+	if !it.isSubdocument(doc) {
+		return struct{}{}, doc, nil
+	}
+	group := []*types.Document{doc}
+	for {
+		next, err := it.nextFetched()
+		if err != nil {
+			return struct{}{}, nil, err
+		}
+		if next == nil {
+			break
+		}
+		if !it.isSubdocument(next) {
+			it.peeked = next
+			break
+		}
+		group = append(group, next)
+	}
+	sort.SliceStable(group, func(i, j int) bool {
+		return types.CompareOrderForSort(commonpath.SortKeyValue(group[i], it.path), commonpath.SortKeyValue(group[j], it.path), it.order) == types.Less
+	})
+	it.pending = group[1:]
+	return struct{}{}, group[0], nil
+}
+
+func (it *planSortedIter) Close() {
 	if it.release != nil {
 		it.release()
 	}
