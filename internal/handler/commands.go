@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/FerretDB/wire"
@@ -264,6 +265,9 @@ func (h *Handler) initCommands() {
 					return nil, guardErr
 				}
 				if guardErr := guardAdminHistory(canonicalName, msg); guardErr != nil {
+					return nil, guardErr
+				}
+				if guardErr := guardAdminExport(canonicalName, msg); guardErr != nil {
 					return nil, guardErr
 				}
 				if authenticated {
@@ -558,6 +562,41 @@ func guardAdminHistory(command string, msg *wire.OpMsg) error {
 	return handlererrors.NewCommandErrorMsgWithArgument(
 		handlererrors.ErrUnauthorized,
 		fmt.Sprintf("cannot run %s on the admin database: its history is managed through the user management commands", command),
+		command,
+	)
+}
+
+// adminExporters are the version-control commands (by canonical name) that
+// would copy the admin database, and with it every user's SCRAM keys, to a
+// remote. Removing or listing an admin remote stays allowed.
+var adminExporters = map[string]func(*wire.OpMsg) bool{
+	"doltPush":   alwaysMutatesState,
+	"doltRemote": remoteAddsRemote,
+}
+
+func remoteAddsRemote(msg *wire.OpMsg) bool {
+	document, err := opMsgDocument(msg)
+	if err != nil {
+		return false
+	}
+	value, _ := document.Get("action")
+	action, ok := value.(string)
+	return ok && strings.ToLower(strings.TrimSpace(action)) == "add"
+}
+
+// guardAdminExport refuses commands that would send the admin database to a
+// remote. Like guardAdminHistory it applies with or without access control.
+func guardAdminExport(command string, msg *wire.OpMsg) error {
+	exports, ok := adminExporters[command]
+	if !ok || !exports(msg) {
+		return nil
+	}
+	if _, db, _ := wireCommandTarget(msg); !isAdminDatabase(db) {
+		return nil
+	}
+	return handlererrors.NewCommandErrorMsgWithArgument(
+		handlererrors.ErrUnauthorized,
+		fmt.Sprintf("cannot run %s on the admin database: it may not be copied to a remote", command),
 		command,
 	)
 }
