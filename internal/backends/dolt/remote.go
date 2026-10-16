@@ -66,6 +66,9 @@ func (b *Backend) remoteAdd(ctx context.Context, coll backends.Collection, param
 		return nil, fmt.Errorf("dumboRemote add: %w", err)
 	}
 
+	b.configURLMu.Lock()
+	defer b.configURLMu.Unlock()
+
 	if err = b.checkURLConflict(ctx, "dumboRemote add", ru.Raw, "", backupsCollection); err != nil {
 		return nil, err
 	}

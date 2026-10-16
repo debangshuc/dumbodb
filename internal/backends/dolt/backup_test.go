@@ -16,8 +16,11 @@ package dolt
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/dolthub/dumbodb/internal/backends"
@@ -175,6 +178,74 @@ func TestRemotesCannotShareABackupURL(t *testing.T) {
 	for _, db := range []string{"mydb", "orders"} {
 		if _, err := b.DumboDBRemote(ctx, &backends.RemoteParams{DBName: db, Action: "add", Name: "origin", URL: other}); err != nil {
 			t.Errorf("remotes may still share a non-backup url (%s): %v", db, err)
+		}
+	}
+}
+
+// Claiming a URL is check-then-insert; concurrent claims on one URL, whether
+// by remotes or backups of any database, must leave exactly one owner.
+func TestConcurrentClaimsOnOneURLLeaveOneOwner(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+	dbs := []string{"orders", "inventory", "billing"}
+	for _, db := range dbs {
+		insertDoc(t, b, db, "coll", mustDoc(t, "_id", int64(1)))
+	}
+
+	for round := 0; round < 20; round++ {
+		url := "file://" + filepath.Join(t.TempDir(), fmt.Sprintf("contested-%d", round))
+		name := fmt.Sprintf("r%d", round)
+
+		var wg sync.WaitGroup
+		var succeeded atomic.Int32
+		claim := func(fn func() error) {
+			defer wg.Done()
+			if fn() == nil {
+				succeeded.Add(1)
+			}
+		}
+		for _, db := range dbs {
+			wg.Add(2)
+			go claim(func() error {
+				_, err := b.DumboDBBackup(ctx, backupParams(db, "add", name, url))
+				return err
+			})
+			go claim(func() error {
+				_, err := b.DumboDBRemote(ctx, &backends.RemoteParams{DBName: db, Action: "add", Name: name, URL: url})
+				return err
+			})
+		}
+		wg.Wait()
+
+		backupOwners := 0
+		for _, db := range dbs {
+			res, err := b.DumboDBBackup(ctx, backupParams(db, "list", "", ""))
+			if err != nil {
+				t.Fatalf("backup list: %v", err)
+			}
+			for _, bk := range res.Backups {
+				if bk.URL == url {
+					backupOwners++
+				}
+			}
+		}
+		remoteOwners := 0
+		for _, db := range dbs {
+			res, err := b.DumboDBRemote(ctx, &backends.RemoteParams{DBName: db, Action: "list"})
+			if err != nil {
+				t.Fatalf("remote list: %v", err)
+			}
+			for _, r := range res.Remotes {
+				if r.URL == url {
+					remoteOwners++
+				}
+			}
+		}
+
+		// Remotes may share a URL with each other; a backup shares it with nothing.
+		if backupOwners > 1 || (backupOwners == 1 && remoteOwners > 0) {
+			t.Fatalf("round %d: %d backups and %d remotes claim %s (%d claims succeeded)",
+				round, backupOwners, remoteOwners, url, succeeded.Load())
 		}
 	}
 }

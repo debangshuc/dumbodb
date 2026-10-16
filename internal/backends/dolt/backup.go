@@ -108,6 +108,9 @@ func (b *Backend) backupAdd(ctx context.Context, coll backends.Collection, param
 		return nil, fmt.Errorf("dumboBackup add: unsupported backup scheme %q", ru.Scheme)
 	}
 
+	b.configURLMu.Lock()
+	defer b.configURLMu.Unlock()
+
 	id := remoteID(params.DBName, params.Name)
 	existing, err := findRemoteDoc(ctx, coll, id)
 	if err != nil {
@@ -240,7 +243,10 @@ func (b *Backend) backupSync(ctx context.Context, coll backends.Collection, para
 	if !isCloneableScheme(ru.Scheme) {
 		return nil, fmt.Errorf("dumboBackup %s: unsupported backup scheme %q", params.Action, ru.Scheme)
 	}
-	if err = b.checkURLConflict(ctx, "dumboBackup "+params.Action, ru.Raw, params.DBName, remotesCollection, backupsCollection); err != nil {
+	b.configURLMu.Lock()
+	err = b.checkURLConflict(ctx, "dumboBackup "+params.Action, ru.Raw, params.DBName, remotesCollection, backupsCollection)
+	b.configURLMu.Unlock()
+	if err != nil {
 		return nil, err
 	}
 

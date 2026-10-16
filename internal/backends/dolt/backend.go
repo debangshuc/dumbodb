@@ -246,6 +246,11 @@ type Backend struct {
 	dbs      map[string]*dbState // dbName -> dbState
 	branchMu sync.Mutex
 
+	// configURLMu serializes registering a remote or backup URL, so the
+	// check that no conflicting config owns the URL and the insert that
+	// claims it are one step.
+	configURLMu sync.Mutex
+
 	provider *dumbodbProvider
 
 	gcController *gcctx.GCSafepointController
