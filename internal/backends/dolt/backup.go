@@ -21,6 +21,13 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/dolthub/dolt/go/libraries/doltcore/dbfactory"
+	"github.com/dolthub/dolt/go/libraries/doltcore/doltdb"
+	"github.com/dolthub/dolt/go/libraries/doltcore/env/actions"
+	"github.com/dolthub/dolt/go/libraries/utils/filesys"
+	"github.com/dolthub/dolt/go/store/datas/pull"
+	"github.com/dolthub/dolt/go/store/hash"
+
 	"github.com/dolthub/dumbodb/internal/backends"
 	"github.com/dolthub/dumbodb/internal/types"
 	"github.com/dolthub/dumbodb/internal/util/iterator"
@@ -52,8 +59,10 @@ func (b *Backend) DumboDBBackup(ctx context.Context, params *backends.BackupPara
 		return b.backupList(ctx, coll, params)
 	case "remove":
 		return b.backupRemove(ctx, coll, params)
+	case "sync", "sync-url":
+		return b.backupSync(ctx, coll, params)
 	default:
-		return nil, fmt.Errorf("dumboBackup: unknown action %q (expected add, list, or remove)", params.Action)
+		return nil, fmt.Errorf("dumboBackup: unknown action %q (expected add, list, remove, sync, or sync-url)", params.Action)
 	}
 }
 
@@ -104,7 +113,7 @@ func (b *Backend) backupAdd(ctx context.Context, coll backends.Collection, param
 		return nil, fmt.Errorf("dumboBackup add: backup %q already exists for database %q", params.Name, params.DBName)
 	}
 
-	if err = b.checkBackupURLConflict(ctx, ru.Raw); err != nil {
+	if err = b.checkBackupURLConflict(ctx, ru.Raw, ""); err != nil {
 		return nil, err
 	}
 
@@ -121,10 +130,10 @@ func (b *Backend) backupAdd(ctx context.Context, coll backends.Collection, param
 	return &backends.BackupResult{Backups: []backends.BackupInfo{{Name: params.Name, URL: ru.Raw}}}, nil
 }
 
-// checkBackupURLConflict refuses a backup URL already used by any remote or
-// backup of any database. A backup sync replaces the destination's root, so a
-// shared URL would destroy the other remote or backup.
-func (b *Backend) checkBackupURLConflict(ctx context.Context, url string) error {
+// checkBackupURLConflict refuses a backup URL already used by any remote, or
+// by a backup of any database other than ownerDB. A backup sync replaces the
+// destination's root, so a shared URL would destroy the other remote or backup.
+func (b *Backend) checkBackupURLConflict(ctx context.Context, url, ownerDB string) error {
 	for _, collName := range []string{remotesCollection, backupsCollection} {
 		coll, err := b.adminCollection(collName)
 		if err != nil {
@@ -135,10 +144,14 @@ func (b *Backend) checkBackupURLConflict(ctx context.Context, url string) error 
 			return err
 		}
 		for _, doc := range docs {
-			if u, _ := doc.Get("url"); u == url {
-				id, _ := doc.Get("_id")
-				return fmt.Errorf("dumboBackup add: url %q is already used by %s %q", url, configKind(collName), id)
+			if u, _ := doc.Get("url"); u != url {
+				continue
 			}
+			if db, _ := doc.Get("db"); collName == backupsCollection && ownerDB != "" && db == ownerDB {
+				continue
+			}
+			id, _ := doc.Get("_id")
+			return fmt.Errorf("dumboBackup: url %q is already used by %s %q", url, configKind(collName), id)
 		}
 	}
 	return nil
@@ -191,6 +204,119 @@ func (b *Backend) backupRemove(ctx context.Context, coll backends.Collection, pa
 	}
 
 	return &backends.BackupResult{}, nil
+}
+
+// backupSync replaces the backup's root with the database's root. The root
+// covers every branch, tag and working set, so uncommitted (but command-
+// committed) changes are carried. Later syncs copy only missing chunks.
+func (b *Backend) backupSync(ctx context.Context, coll backends.Collection, params *backends.BackupParams) (*backends.BackupResult, error) {
+	url := params.URL
+	if params.Action == "sync" {
+		if err := validateConfigName("dumboBackup", "backup", params.Name); err != nil {
+			return nil, err
+		}
+		doc, err := findRemoteDoc(ctx, coll, remoteID(params.DBName, params.Name))
+		if err != nil {
+			return nil, err
+		}
+		if doc == nil {
+			return nil, fmt.Errorf("dumboBackup sync: backup %q not found for database %q", params.Name, params.DBName)
+		}
+		stored, _ := doc.Get("url")
+		url, _ = stored.(string)
+	} else if url == "" {
+		return nil, fmt.Errorf("dumboBackup sync-url: url is required")
+	}
+
+	ru, err := b.parseRemoteURL(url)
+	if err != nil {
+		return nil, fmt.Errorf("dumboBackup %s: %w", params.Action, err)
+	}
+	if !isCloneableScheme(ru.Scheme) {
+		return nil, fmt.Errorf("dumboBackup %s: unsupported backup scheme %q", params.Action, ru.Scheme)
+	}
+	if err = b.checkBackupURLConflict(ctx, ru.Raw, params.DBName); err != nil {
+		return nil, err
+	}
+
+	state, err := b.getOrOpenDB(ctx, params.DBName, false)
+	if err != nil {
+		return nil, err
+	}
+	if state == nil {
+		return nil, backends.NewError(backends.ErrorCodeDatabaseDoesNotExist,
+			fmt.Errorf("dumboBackup %s: database %q does not exist", params.Action, params.DBName))
+	}
+
+	nbf := state.doltDB.Format()
+	if remotePreparable(ru.Scheme) {
+		if err = dbfactory.PrepareDB(ctx, nbf, ru.Raw, nil); err != nil {
+			return nil, fmt.Errorf("dumboBackup %s: preparing %q: %w", params.Action, ru.Raw, err)
+		}
+	}
+	remoteParams, err := b.remoteDBParams(ru.Scheme)
+	if err != nil {
+		return nil, fmt.Errorf("dumboBackup %s: %w", params.Action, err)
+	}
+	dest, err := doltdb.LoadDoltDBWithParams(ctx, nbf, ru.Raw, filesys.LocalFS, remoteParams)
+	if err != nil {
+		return nil, fmt.Errorf("dumboBackup %s: opening %q: %w", params.Action, ru.Raw, err)
+	}
+	defer func() { _ = dest.Close() }()
+
+	tempDir, err := os.MkdirTemp(b.dataDir, ".backup-*")
+	if err != nil {
+		return nil, fmt.Errorf("dumboBackup %s: creating temp dir: %w", params.Action, err)
+	}
+	defer func() { _ = os.RemoveAll(tempDir) }()
+
+	err = b.runAsGCSession(func() error {
+		var syncErr error
+		pull.WithDiscardingStatsCh(func(statsCh chan pull.Stats) {
+			syncErr = actions.SyncRoots(ctx, state.doltDB, dest, tempDir, actions.SyncRootsDBRelationshipUnknown, statsCh)
+		})
+		return syncErr
+	})
+	upToDate := errors.Is(err, pull.ErrDBUpToDate)
+	if err != nil && !upToDate {
+		return nil, fmt.Errorf("dumboBackup %s: %w", params.Action, err)
+	}
+
+	root, err := dest.NomsRoot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("dumboBackup %s: reading backup root: %w", params.Action, err)
+	}
+
+	return &backends.BackupResult{URL: ru.Raw, Root: root.String(), UpToDate: upToDate}, nil
+}
+
+// gcSession is a GC roots provider owning no roots. Registering one for the
+// length of an operation makes an in-flight GC wait at its pre-finalize
+// safepoint until the operation ends, so chunks it reads are not swept.
+type gcSession struct {
+	// A zero-size struct could share its address with another allocation,
+	// and the controller keys sessions by pointer.
+	_ byte
+}
+
+func (*gcSession) VisitGCRoots(context.Context, string, func(hash.Hash) bool) error {
+	return nil
+}
+
+// runAsGCSession runs fn as its own GC session. Unlike
+// RunUnderGCSafepointKeeper, which shares one provider and panics on
+// overlapping use, concurrent callers each get a fresh session.
+func (b *Backend) runAsGCSession(fn func() error) error {
+	if b.gcController == nil {
+		return fn()
+	}
+	s := &gcSession{}
+	if err := b.gcController.SessionCommandBegin(s); err != nil {
+		return err
+	}
+	defer b.gcController.SessionEnd(s)
+	defer b.gcController.SessionCommandEnd(s)
+	return fn()
 }
 
 // queryConfigDocs returns every document in coll matching filter (nil for all).

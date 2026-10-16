@@ -789,10 +789,10 @@ type RemoteResult struct {
 
 // BackupParams are the arguments to DumboDBBackup.
 type BackupParams struct {
-	DBName string // database being backed up (add, list, remove)
-	Action string // "add", "list", or "remove"
-	Name   string // backup name (add, remove)
-	URL    string // backup url (add)
+	DBName string // database being backed up (add, list, remove, sync, sync-url)
+	Action string // "add", "list", "remove", "sync", or "sync-url"
+	Name   string // backup name (add, remove, sync)
+	URL    string // backup url (add, sync-url)
 }
 
 // BackupInfo describes a single configured backup.
@@ -803,8 +803,12 @@ type BackupInfo struct {
 
 // BackupResult is returned by DumboDBBackup. For list it holds all backups for
 // the database; for add it holds the created backup; for remove it is empty.
+// sync and sync-url fill URL, Root and UpToDate.
 type BackupResult struct {
-	Backups []BackupInfo
+	Backups  []BackupInfo
+	URL      string
+	Root     string // the backup's root hash after the sync
+	UpToDate bool   // true when the backup already held the database's root
 }
 
 // PushParams are the arguments to DumboDBPush.
