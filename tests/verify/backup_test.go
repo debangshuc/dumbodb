@@ -14,11 +14,12 @@
 
 package verify
 
-// TestBackupVerify is the automated analog of docs/verify/backup.md.
+// TestBackupVerify is the automated analog of docs/verify/backup.md: back up
+// a database on one server and restore it on another.
 //
-// Each top-level subtest corresponds to one scenario in that document and they
-// run sequentially, sharing one server and backup directory so each scenario's
-// side effects carry into the next.
+// TestBackupActions covers every dumboBackup action on a single server. Its
+// subtests run sequentially, sharing one server and backup directory so each
+// step's side effects carry into the next.
 
 import (
 	"context"
@@ -60,6 +61,34 @@ func e(key string, value any) bson.E {
 }
 
 func TestBackupVerify(t *testing.T) {
+	source := startDumboDB(t).Client
+	target := startDumboDB(t).Client
+	ctx := context.Background()
+	url := "file://" + filepath.Join(t.TempDir(), "orders")
+
+	db := source.Database("orders")
+	_, err := db.Collection("items").InsertMany(ctx, []any{bson.D{{Key: "_id", Value: 1}}, bson.D{{Key: "_id", Value: 2}}})
+	require.NoError(t, err)
+	require.NoError(t, db.RunCommand(ctx, bson.D{{Key: "dumboCommit", Value: 1}, {Key: "message", Value: "first two"}}).Err())
+	require.NoError(t, db.RunCommand(ctx, bson.D{{Key: "dumboBranch", Value: 1}, {Key: "action", Value: "add"}, {Key: "branch", Value: "feature"}}).Err())
+	_, err = db.Collection("items").InsertOne(ctx, bson.D{{Key: "_id", Value: 3}})
+	require.NoError(t, err)
+
+	runBackup(t, source, e("action", "add"), e("db", "orders"), e("name", "offsite"), e("url", url))
+	synced := runBackup(t, source, e("action", "sync"), e("db", "orders"), e("name", "offsite"))
+	require.Equal(t, false, synced["upToDate"])
+
+	restored := runBackup(t, target, e("action", "restore"), e("url", url), e("as", "orders"))
+	require.Equal(t, synced["root"], restored["root"])
+
+	require.EqualValues(t, 3, countIn(t, target, "orders", "items"), "the uncommitted insert is restored")
+	require.EqualValues(t, 2, countIn(t, target, "orders@feature", "items"))
+	var status bson.M
+	require.NoError(t, target.Database("orders").RunCommand(ctx, bson.D{{Key: "dumboStatus", Value: 1}}).Decode(&status))
+	require.Equal(t, true, status["dirty"], "%v", status)
+}
+
+func TestBackupActions(t *testing.T) {
 	env := startDumboDB(t)
 	c := env.Client
 	ctx := context.Background()
