@@ -16,6 +16,7 @@ package dolt
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -133,5 +134,47 @@ func TestDumboDBBackupAddRejects(t *testing.T) {
 	}
 	if len(res.Backups) != 1 {
 		t.Errorf("rejected adds were stored: %+v", res.Backups)
+	}
+}
+
+// A remote, including the origin a clone registers, may not take a URL that
+// is already a backup: pushes would write into it and the next backup sync
+// would replace their refs.
+func TestRemotesCannotShareABackupURL(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+	insertDoc(t, b, "orders", "coll", mustDoc(t, "_id", int64(1)))
+	insertDoc(t, b, "mydb", "coll", mustDoc(t, "_id", int64(1)))
+	url := "file://" + filepath.Join(t.TempDir(), "orders-backup")
+
+	if _, err := b.DumboDBBackup(ctx, backupParams("orders", "add", "nightly", url)); err != nil {
+		t.Fatalf("backup add: %v", err)
+	}
+
+	for _, db := range []string{"mydb", "orders"} {
+		if _, err := b.DumboDBRemote(ctx, &backends.RemoteParams{DBName: db, Action: "add", Name: "origin", URL: url}); err == nil {
+			t.Errorf("remote add on %s with a backup url: want error, got nil", db)
+		}
+		res, err := b.DumboDBRemote(ctx, &backends.RemoteParams{DBName: db, Action: "list"})
+		if err != nil {
+			t.Fatalf("remote list: %v", err)
+		}
+		if len(res.Remotes) != 0 {
+			t.Errorf("rejected remote was stored on %s: %+v", db, res.Remotes)
+		}
+	}
+
+	if _, err := b.DumboDBClone(ctx, &backends.CloneParams{From: url, As: "loot"}); err == nil {
+		t.Error("clone from a backup url: want error, got nil")
+	}
+	if _, err := os.Stat(filepath.Join(b.dataDir, "loot")); !os.IsNotExist(err) {
+		t.Errorf("a refused clone created the database: %v", err)
+	}
+
+	other := "file://" + filepath.Join(t.TempDir(), "shared-remote")
+	for _, db := range []string{"mydb", "orders"} {
+		if _, err := b.DumboDBRemote(ctx, &backends.RemoteParams{DBName: db, Action: "add", Name: "origin", URL: other}); err != nil {
+			t.Errorf("remotes may still share a non-backup url (%s): %v", db, err)
+		}
 	}
 }

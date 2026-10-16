@@ -1855,6 +1855,7 @@ db.runCommand({ dumboRemote: 1, action: "remove", name: "origin" })
 | `action` is not `add`/`list`/`remove` | `BadValue: dumboRemote: action must be add, list, or remove` |
 | `add`/`remove` without `name` | `BadValue: dumboRemote <action>: name is required` |
 | `add` without `url` | `BadValue: dumboRemote add: url is required` |
+| `add` with a URL used by any database's backup | `OperationFailed: dumboRemote add: url "<url>" is already used by backup "<db>.<name>"` |
 
 ### Notes
 
@@ -1909,6 +1910,7 @@ admin.runCommand({ dumboClone: 1, from: "myorg/orders", as: "orders" })
 | `as` is a reserved name (`admin`, `config`, `local`) | `OperationFailed: dumboClone: "<name>" is a reserved database name` |
 | A database named `as` already exists | `OperationFailed: dumboClone: database "<name>" already exists` |
 | Remote scheme not cloneable | `OperationFailed: dumboClone: unsupported remote scheme "<scheme>"` |
+| `from` is a backup's URL (restore it with `dumboBackup` instead) | `OperationFailed: dumboClone: url "<url>" is already used by backup "<db>.<name>"` |
 
 ### Notes
 

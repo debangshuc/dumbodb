@@ -117,7 +117,7 @@ func (b *Backend) backupAdd(ctx context.Context, coll backends.Collection, param
 		return nil, fmt.Errorf("dumboBackup add: backup %q already exists for database %q", params.Name, params.DBName)
 	}
 
-	if err = b.checkBackupURLConflict(ctx, ru.Raw, ""); err != nil {
+	if err = b.checkURLConflict(ctx, "dumboBackup add", ru.Raw, "", remotesCollection, backupsCollection); err != nil {
 		return nil, err
 	}
 
@@ -134,11 +134,12 @@ func (b *Backend) backupAdd(ctx context.Context, coll backends.Collection, param
 	return &backends.BackupResult{Backups: []backends.BackupInfo{{Name: params.Name, URL: ru.Raw}}}, nil
 }
 
-// checkBackupURLConflict refuses a backup URL already used by any remote, or
-// by a backup of any database other than ownerDB. A backup sync replaces the
-// destination's root, so a shared URL would destroy the other remote or backup.
-func (b *Backend) checkBackupURLConflict(ctx context.Context, url, ownerDB string) error {
-	for _, collName := range []string{remotesCollection, backupsCollection} {
+// checkURLConflict refuses a URL already used by a config in any of
+// collNames, other than a backup of ownerDB. A backup sync replaces the
+// destination's root, so a backup URL shared with a remote or with another
+// database's backup would destroy one of them.
+func (b *Backend) checkURLConflict(ctx context.Context, command, url, ownerDB string, collNames ...string) error {
+	for _, collName := range collNames {
 		coll, err := b.adminCollection(collName)
 		if err != nil {
 			return err
@@ -155,7 +156,7 @@ func (b *Backend) checkBackupURLConflict(ctx context.Context, url, ownerDB strin
 				continue
 			}
 			id, _ := doc.Get("_id")
-			return fmt.Errorf("dumboBackup: url %q is already used by %s %q", url, configKind(collName), id)
+			return fmt.Errorf("%s: url %q is already used by %s %q", command, url, configKind(collName), id)
 		}
 	}
 	return nil
@@ -239,7 +240,7 @@ func (b *Backend) backupSync(ctx context.Context, coll backends.Collection, para
 	if !isCloneableScheme(ru.Scheme) {
 		return nil, fmt.Errorf("dumboBackup %s: unsupported backup scheme %q", params.Action, ru.Scheme)
 	}
-	if err = b.checkBackupURLConflict(ctx, ru.Raw, params.DBName); err != nil {
+	if err = b.checkURLConflict(ctx, "dumboBackup "+params.Action, ru.Raw, params.DBName, remotesCollection, backupsCollection); err != nil {
 		return nil, err
 	}
 

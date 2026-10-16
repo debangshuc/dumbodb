@@ -66,6 +66,10 @@ func (b *Backend) remoteAdd(ctx context.Context, coll backends.Collection, param
 		return nil, fmt.Errorf("dumboRemote add: %w", err)
 	}
 
+	if err = b.checkURLConflict(ctx, "dumboRemote add", ru.Raw, "", backupsCollection); err != nil {
+		return nil, err
+	}
+
 	id := remoteID(params.DBName, params.Name)
 
 	existing, err := findRemoteDoc(ctx, coll, id)
