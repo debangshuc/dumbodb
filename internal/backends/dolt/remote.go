@@ -57,7 +57,7 @@ func (b *Backend) DumboDBRemote(ctx context.Context, params *backends.RemotePara
 }
 
 func (b *Backend) remoteAdd(ctx context.Context, coll backends.Collection, params *backends.RemoteParams) (*backends.RemoteResult, error) {
-	if err := validateRemoteName(params.Name); err != nil {
+	if err := validateConfigName("dumboRemote", "remote", params.Name); err != nil {
 		return nil, err
 	}
 
@@ -190,17 +190,17 @@ func (b *Backend) remoteExists(ctx context.Context, dbName, name string) (bool, 
 	return doc != nil, nil
 }
 
-// validateRemoteName rejects empty names and the two characters reserved
-// elsewhere in the identity/branch encoding.
-func validateRemoteName(name string) error {
+// validateConfigName rejects empty remote or backup names and the two
+// characters reserved elsewhere in the identity/branch encoding.
+func validateConfigName(command, kind, name string) error {
 	if name == "" {
-		return fmt.Errorf("dumboRemote: remote name is required")
+		return fmt.Errorf("%s: %s name is required", command, kind)
 	}
 	if strings.Contains(name, "@") {
-		return fmt.Errorf("dumboRemote: remote name must not contain '@' (reserved as the database/branch delimiter)")
+		return fmt.Errorf("%s: %s name must not contain '@' (reserved as the database/branch delimiter)", command, kind)
 	}
 	if strings.ContainsAny(name, " \t\n") {
-		return fmt.Errorf("dumboRemote: remote name must not contain whitespace")
+		return fmt.Errorf("%s: %s name must not contain whitespace", command, kind)
 	}
 	return nil
 }

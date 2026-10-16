@@ -693,6 +693,11 @@ type VersioningBackend interface {
 	// DumboDBRemote adds, lists, or removes a named remote for a database.
 	DumboDBRemote(context.Context, *RemoteParams) (*RemoteResult, error)
 
+	// DumboDBBackup manages Dolt-style backups of a single database: named
+	// backup registration (add, list, remove), sync to a backup URL, and
+	// restore from one.
+	DumboDBBackup(context.Context, *BackupParams) (*BackupResult, error)
+
 	// DumboDBPush pushes a branch's committed HEAD to a configured remote.
 	DumboDBPush(context.Context, *PushParams) (*PushResult, error)
 
@@ -780,6 +785,26 @@ type RemoteInfo struct {
 // the database; for add it holds the created remote; for remove it is empty.
 type RemoteResult struct {
 	Remotes []RemoteInfo
+}
+
+// BackupParams are the arguments to DumboDBBackup.
+type BackupParams struct {
+	DBName string // database being backed up (add, list, remove)
+	Action string // "add", "list", or "remove"
+	Name   string // backup name (add, remove)
+	URL    string // backup url (add)
+}
+
+// BackupInfo describes a single configured backup.
+type BackupInfo struct {
+	Name string
+	URL  string
+}
+
+// BackupResult is returned by DumboDBBackup. For list it holds all backups for
+// the database; for add it holds the created backup; for remove it is empty.
+type BackupResult struct {
+	Backups []BackupInfo
 }
 
 // PushParams are the arguments to DumboDBPush.
