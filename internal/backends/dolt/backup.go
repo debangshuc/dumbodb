@@ -40,9 +40,13 @@ const backupsCollection = "system.backups"
 
 // DumboDBBackup manages Dolt-style backups of one database. Backup
 // definitions live in admin.system.backups, parallel to admin.system.remotes.
-// The admin database itself can never be backed up: it holds every user's
-// SCRAM keys.
+// The admin database itself can never be backed up or restored: it holds every
+// user's SCRAM keys.
 func (b *Backend) DumboDBBackup(ctx context.Context, params *backends.BackupParams) (*backends.BackupResult, error) {
+	if params.Action == "restore" {
+		return b.backupRestore(ctx, params)
+	}
+
 	if err := b.validateBackupSourceDB(params.DBName); err != nil {
 		return nil, err
 	}
@@ -62,7 +66,7 @@ func (b *Backend) DumboDBBackup(ctx context.Context, params *backends.BackupPara
 	case "sync", "sync-url":
 		return b.backupSync(ctx, coll, params)
 	default:
-		return nil, fmt.Errorf("dumboBackup: unknown action %q (expected add, list, remove, sync, or sync-url)", params.Action)
+		return nil, fmt.Errorf("dumboBackup: unknown action %q (expected add, list, remove, sync, sync-url, or restore)", params.Action)
 	}
 }
 
