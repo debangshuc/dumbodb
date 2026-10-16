@@ -3566,6 +3566,7 @@ type mapIter struct {
 	// prefilter keeps the unconditional full-scan behavior.
 	prefilter func([]byte) bool
 	fields    []string
+	buf       []byte
 	// release, if set, unpins the iterated map's root from GC on Close.
 	release func()
 }
@@ -3632,7 +3633,8 @@ func (it *mapIter) Next() (struct{}, *types.Document, error) {
 			return struct{}{}, doc, nil
 		}
 
-		jsonBytes, err := getBSONStoredBytes(it.ctx, it.ns, v)
+		var jsonBytes []byte
+		jsonBytes, it.buf, err = readStoredBytesReusing(it.ctx, it.ns, v, it.buf)
 		if err != nil {
 			continue
 		}

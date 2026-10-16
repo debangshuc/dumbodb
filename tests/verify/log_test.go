@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -287,6 +288,9 @@ func TestLogVerify(t *testing.T) {
 	})
 	require.NoError(t, err)
 	hashB := dumboDBCommit(t, env, mergeDBName, "add-two", "alice <alice@acme.com>")
+
+	// Commit timestamps have millisecond resolution; hashC must be strictly newer.
+	time.Sleep(2 * time.Millisecond)
 
 	// Advance feat independently: _id:3 -> hashC (diverges from hashA).
 	_, err = env.Client.Database(mergeDBName+"@feat").Collection("events").InsertOne(ctx, bson.D{
