@@ -525,7 +525,13 @@ func newBackend(dataDir string, l *slog.Logger, autoCommit, sessionIsolation boo
 	// empty. Without this, compact on a non-existent collection in admin
 	// incorrectly returns "database does not exist" instead of "collection
 	// does not exist".
+	// The admin store's noms LOCK is held for the life of the process, so it
+	// doubles as the exclusive lock on dataDir.
 	if _, err := b.getOrOpenDB(context.Background(), "admin", true); err != nil {
+		if errors.Is(err, nbs.ErrDatabaseLocked) {
+			return nil, fmt.Errorf("data directory %q is in use by another process (could not lock %s): %w",
+				dataDir, filepath.Join(dataDir, "admin", "LOCK"), err)
+		}
 		return nil, fmt.Errorf("initializing admin database: %w", err)
 	}
 
@@ -806,7 +812,7 @@ func (b *Backend) getOrOpenDB(ctx context.Context, dbName string, create bool) (
 func openDatabaseStore(ctx context.Context, dbDir string) (*nbs.GenerationalNBS, error) {
 	q := nbs.NewUnlimitedMemQuotaProvider()
 
-	newGenSt, err := nbs.NewLocalJournalingStore(ctx, dolttypes.Format_DOLT.VersionString(), dbDir, q, false, nil)
+	newGenSt, err := nbs.NewLocalJournalingStoreWithOptions(ctx, dolttypes.Format_DOLT.VersionString(), dbDir, q, false, nil, nbs.JournalingStoreOptions{FailOnLockTimeout: true})
 	if err != nil {
 		return nil, fmt.Errorf("opening newgen NBS store: %w", err)
 	}
