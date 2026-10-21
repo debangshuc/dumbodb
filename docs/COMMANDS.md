@@ -101,6 +101,8 @@ Commits the current working set on the branch encoded in the database name.
 | `message` | string | no | `""` | Commit message |
 | `author` | string | no | `"dumbodb <dumbodb@dumbodb>"` | Commit author, e.g. `"alice <alice@example.com>"` |
 | `timestamp` | Date | no | current time | Commit timestamp (BSON Date) |
+| `allowEmpty` | bool | no | `false` | Create a commit even when the working set has no changes vs HEAD |
+| `amend` | bool | no | `false` | Replace HEAD with a commit on HEAD's parents, as `dolt commit --amend`. Omitting `message` keeps HEAD's message. Implies `allowEmpty` |
 
 ### Response fields
 

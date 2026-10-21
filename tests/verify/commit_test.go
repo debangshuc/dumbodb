@@ -422,4 +422,66 @@ func TestCommitVerify(t *testing.T) {
 		assert.Equal(t, fixedTime.UnixMilli(), int64(logTS),
 			"doltLog timestamp must match the provided fixed time")
 	})
+
+	// -------------------------------------------------------------------------
+	// Scenario 8: Amend replaces HEAD
+	// -------------------------------------------------------------------------
+	t.Run("Scenario8_AmendReplacesHead", func(t *testing.T) {
+		db := env.Client.Database(dbName)
+		headLog := func() bson.A {
+			var logResult bson.M
+			require.NoError(t, db.RunCommand(ctx, bson.D{
+				{Key: "doltLog", Value: int32(1)},
+				{Key: "limit", Value: int32(2)},
+			}).Decode(&logResult))
+			commits, ok := logResult["commits"].(bson.A)
+			require.True(t, ok)
+			require.Len(t, commits, 2)
+			return commits
+		}
+
+		before := headLog()
+		headBefore := before[0].(bson.M)["commitId"]
+		parentBefore := before[0].(bson.M)["parent1"]
+		require.NotEmpty(t, parentBefore)
+
+		_, err := db.Collection("orders").InsertOne(ctx, bson.D{
+			{Key: "_id", Value: int32(80)},
+			{Key: "label", Value: "amend"},
+			{Key: "v", Value: int32(80)},
+		})
+		require.NoError(t, err)
+
+		var amended bson.M
+		require.NoError(t, db.RunCommand(ctx, bson.D{
+			{Key: "doltCommit", Value: int32(1)},
+			{Key: "amend", Value: true},
+			{Key: "author", Value: "alice <alice@acme.com>"},
+		}).Decode(&amended))
+		assert.Equal(t, "fixed-time commit", amended["message"], "omitting message must keep HEAD's message")
+
+		after := headLog()
+		assert.Equal(t, amended["commitId"], after[0].(bson.M)["commitId"])
+		assert.NotEqual(t, headBefore, after[0].(bson.M)["commitId"])
+		assert.Equal(t, parentBefore, after[0].(bson.M)["parent1"], "amend must keep HEAD's parent")
+		assert.Equal(t, parentBefore, after[1].(bson.M)["commitId"], "the amended-away commit must leave the log")
+
+		err = db.RunCommand(ctx, bson.D{
+			{Key: "doltCommit", Value: int32(1)},
+			{Key: "message", Value: "noop"},
+			{Key: "author", Value: "alice <alice@acme.com>"},
+		}).Err()
+		require.Error(t, err, "the amend must have committed _id:80")
+		assert.Contains(t, err.Error(), "nothing to commit")
+
+		var reworded bson.M
+		require.NoError(t, db.RunCommand(ctx, bson.D{
+			{Key: "doltCommit", Value: int32(1)},
+			{Key: "amend", Value: true},
+			{Key: "message", Value: "reworded"},
+			{Key: "author", Value: "alice <alice@acme.com>"},
+		}).Decode(&reworded))
+		assert.Equal(t, "reworded", reworded["message"])
+		assert.Equal(t, parentBefore, headLog()[0].(bson.M)["parent1"])
+	})
 }
