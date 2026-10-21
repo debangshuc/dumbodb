@@ -130,8 +130,8 @@ func (op *substrOp) Process(doc *types.Document) (any, error) {
 		return nil, err
 	}
 
-	start := int(toFloat64(startV))
-	length := int(toFloat64(lenV))
+	start := toBoundedInt(startV)
+	length := toBoundedInt(lenV)
 
 	bytes := []byte(s)
 	n := len(bytes)
@@ -148,9 +148,9 @@ func (op *substrOp) Process(doc *types.Document) (any, error) {
 		return string(bytes[start:]), nil
 	}
 
-	end := start + length
-	if end > n {
-		end = n
+	end := n
+	if length < n-start {
+		end = start + length
 	}
 
 	return string(bytes[start:end]), nil
@@ -199,8 +199,8 @@ func (op *substrCPOp) Process(doc *types.Document) (any, error) {
 		return nil, err
 	}
 
-	start := int(toFloat64(startV))
-	length := int(toFloat64(lenV))
+	start := toBoundedInt(startV)
+	length := toBoundedInt(lenV)
 
 	runes := []rune(s)
 	n := len(runes)
@@ -217,9 +217,9 @@ func (op *substrCPOp) Process(doc *types.Document) (any, error) {
 		return string(runes[start:]), nil
 	}
 
-	end := start + length
-	if end > n {
-		end = n
+	end := n
+	if length < n-start {
+		end = start + length
 	}
 
 	return string(runes[start:end]), nil
@@ -437,7 +437,7 @@ func (op *indexOfBytesOp) Process(doc *types.Document) (any, error) {
 		}
 
 		if stv != types.Null {
-			start = int(toFloat64(stv))
+			start = toBoundedInt(stv)
 		}
 	}
 
@@ -448,7 +448,7 @@ func (op *indexOfBytesOp) Process(doc *types.Document) (any, error) {
 		}
 
 		if ev != types.Null {
-			end = int(toFloat64(ev))
+			end = toBoundedInt(ev)
 		}
 	}
 
@@ -534,7 +534,7 @@ func (op *indexOfCPOp) Process(doc *types.Document) (any, error) {
 		}
 
 		if stv != types.Null {
-			start = int(toFloat64(stv))
+			start = toBoundedInt(stv)
 		}
 	}
 
@@ -545,7 +545,7 @@ func (op *indexOfCPOp) Process(doc *types.Document) (any, error) {
 		}
 
 		if ev != types.Null {
-			end = int(toFloat64(ev))
+			end = toBoundedInt(ev)
 		}
 	}
 

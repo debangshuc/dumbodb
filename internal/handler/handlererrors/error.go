@@ -256,6 +256,9 @@ const (
 	// ErrSliceFirstArg for $slice indicates that the first argument is not an array.
 	ErrSliceFirstArg = ErrorCode(28724) // Location28724
 
+	// ErrSliceThirdArgNotPositive indicates a negative count after a position in $slice.
+	ErrSliceThirdArgNotPositive = ErrorCode(28729) // Location28729
+
 	// ErrStageUnsetNoPath indicates that $unwind aggregation stage is empty.
 	ErrStageUnsetNoPath = ErrorCode(31119) // Location31119
 

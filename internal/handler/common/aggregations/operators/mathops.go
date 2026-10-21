@@ -347,7 +347,7 @@ func (op *truncOp) Process(doc *types.Document) (any, error) {
 		}
 
 		if pv != types.Null {
-			place = int(toFloat64(pv))
+			place = toBoundedInt(pv)
 		}
 	}
 
@@ -405,7 +405,7 @@ func (op *roundOp) Process(doc *types.Document) (any, error) {
 		}
 
 		if pv != types.Null {
-			place = int(toFloat64(pv))
+			place = toBoundedInt(pv)
 		}
 	}
 

@@ -134,8 +134,8 @@ func (op *substrBytesOp) Process(doc *types.Document) (any, error) {
 		return nil, err
 	}
 
-	start := int(toFloat64(startV))
-	length := int(toFloat64(lenV))
+	start := toBoundedInt(startV)
+	length := toBoundedInt(lenV)
 
 	b := []byte(s)
 

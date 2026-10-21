@@ -16,6 +16,7 @@ package operators
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/dolthub/dumbodb/internal/handler/common/aggregations"
 	"github.com/dolthub/dumbodb/internal/types"
@@ -191,6 +192,22 @@ func toFloat64(v any) float64 {
 	}
 
 	return 0
+}
+
+// toBoundedInt converts a numeric index or length argument, saturating at the
+// int32 range MongoDB accepts. Unlike int(toFloat64(v)) it is defined for NaN
+// and huge values, and sums of two results cannot overflow int.
+func toBoundedInt(v any) int {
+	f := toFloat64(v)
+	switch {
+	case math.IsNaN(f):
+		return 0
+	case f > math.MaxInt32:
+		return math.MaxInt32
+	case f < math.MinInt32:
+		return math.MinInt32
+	}
+	return int(f)
 }
 
 var (

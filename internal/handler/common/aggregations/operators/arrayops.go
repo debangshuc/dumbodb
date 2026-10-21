@@ -164,7 +164,7 @@ func (op *arrayElemAtOp) Process(doc *types.Document) (any, error) {
 		return types.Null, nil
 	}
 
-	idx := int(toFloat64(idxV))
+	idx := toBoundedInt(idxV)
 	n := arr.Len()
 
 	if idx < 0 {
@@ -293,16 +293,24 @@ func (op *sliceOp) Process(doc *types.Document) (any, error) {
 		return nil, err
 	}
 
-	count := int(toFloat64(nV))
+	count := toBoundedInt(nV)
 
 	start := 0
 	if op.positionArg != nil {
+		if count < 0 {
+			return nil, handlererrors.NewCommandErrorMsgWithArgument(
+				handlererrors.ErrSliceThirdArgNotPositive,
+				fmt.Sprintf("Third argument to $slice must be positive: %d", count),
+				"$slice",
+			)
+		}
+
 		pV, err := evalArgValue(op.positionArg, doc)
 		if err != nil {
 			return nil, err
 		}
 
-		start = int(toFloat64(pV))
+		start = toBoundedInt(pV)
 		if start < 0 {
 			start = n + start
 			if start < 0 {
@@ -323,9 +331,9 @@ func (op *sliceOp) Process(doc *types.Document) (any, error) {
 		return sliceToArray(nil), nil
 	}
 
-	end := start + count
-	if end > n {
-		end = n
+	end := n
+	if count < n-start {
+		end = start + count
 	}
 
 	if start < 0 {
@@ -390,7 +398,7 @@ func (op *indexOfArrayOp) Process(doc *types.Document) (any, error) {
 		}
 
 		if sv != types.Null {
-			start = int(toFloat64(sv))
+			start = toBoundedInt(sv)
 		}
 	}
 
@@ -401,7 +409,7 @@ func (op *indexOfArrayOp) Process(doc *types.Document) (any, error) {
 		}
 
 		if ev != types.Null {
-			end = int(toFloat64(ev))
+			end = toBoundedInt(ev)
 		}
 	}
 
