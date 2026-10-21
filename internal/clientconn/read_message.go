@@ -32,20 +32,24 @@ const handshakeTimeout = 30 * time.Second
 // as its bytes arrive rather than into a buffer of the declared length.
 const largeMessageThreshold = 1 << 20
 
-// readMessage reads one wire message. wire.ReadMessage allocates the full
-// declared length (up to wire.MaxMsgLen) as soon as the header arrives, so a
-// client sending only headers could pin that much per connection. Large
-// messages are first read into a buffer that grows with the bytes actually
-// received.
-func readMessage(r *bufio.Reader) (*wire.MsgHeader, wire.MsgBody, error) {
-	prefix, err := r.Peek(4)
+// readMessage reads one wire message, unwrapping OP_COMPRESSED, and returns the
+// compressor the request used so the reply can use it too. wire.ReadMessage
+// allocates the full declared length (up to wire.MaxMsgLen) as soon as the
+// header arrives, so a client sending only headers could pin that much per
+// connection. Large and compressed messages are first read into a buffer that
+// grows with the bytes actually received.
+func readMessage(r *bufio.Reader) (*wire.MsgHeader, wire.MsgBody, Compressor, error) {
+	header, err := r.Peek(wire.MsgHeaderLen)
 	if err != nil {
-		return wire.ReadMessage(r)
+		h, body, err := wire.ReadMessage(r)
+		return h, body, CompressorNone, err
 	}
 
-	length := int64(binary.LittleEndian.Uint32(prefix))
-	if length <= largeMessageThreshold || length > wire.MaxMsgLen {
-		return wire.ReadMessage(r)
+	length := int64(binary.LittleEndian.Uint32(header[0:4]))
+	compressed := wire.OpCode(binary.LittleEndian.Uint32(header[12:16])) == wire.OpCodeCompressed
+	if length > wire.MaxMsgLen || (length <= largeMessageThreshold && !compressed) {
+		h, body, err := wire.ReadMessage(r)
+		return h, body, CompressorNone, err
 	}
 
 	var buf bytes.Buffer
@@ -53,8 +57,15 @@ func readMessage(r *bufio.Reader) (*wire.MsgHeader, wire.MsgBody, error) {
 		if err == io.EOF {
 			err = io.ErrUnexpectedEOF
 		}
-		return nil, nil, err
+		return nil, nil, CompressorNone, err
 	}
 
-	return wire.ReadMessage(bufio.NewReader(&buf))
+	message, compressor := buf.Bytes(), CompressorNone
+	if compressed {
+		if message, compressor, err = decompressMessage(message); err != nil {
+			return nil, nil, CompressorNone, err
+		}
+	}
+	h, body, err := wire.ReadMessage(bufio.NewReader(bytes.NewReader(message)))
+	return h, body, compressor, err
 }

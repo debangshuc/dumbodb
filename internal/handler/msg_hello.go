@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -75,6 +76,9 @@ func (h *Handler) hello(ctx context.Context, doc *types.Document, tcpHost, name 
 	}
 
 	res := must.NotFail(types.NewDocument())
+	if compression := negotiateCompression(doc); compression != nil {
+		res.Set("compression", compression)
+	}
 	isSecondary := name != ""
 	if h.ReplicationTopology != nil {
 		isSecondary = h.ReplicationTopology.Snapshot().State == topology.StateSecondary
@@ -170,6 +174,32 @@ func (h *Handler) hello(ctx context.Context, doc *types.Document, tcpHost, name 
 	res.Set("ok", float64(1))
 
 	return res, nil
+}
+
+// supportedCompressors lists the OP_COMPRESSED compressors clientconn decodes.
+var supportedCompressors = []string{"snappy"}
+
+// negotiateCompression returns the client's requested compressors that the
+// server supports, in the client's order, or nil when there are none; mongod
+// then omits the field.
+func negotiateCompression(doc *types.Document) *types.Array {
+	requested, _ := doc.Get("compression")
+	list, ok := requested.(*types.Array)
+	if !ok {
+		return nil
+	}
+	var accepted *types.Array
+	for i := 0; i < list.Len(); i++ {
+		name, _ := must.NotFail(list.Get(i)).(string)
+		if !slices.Contains(supportedCompressors, name) {
+			continue
+		}
+		if accepted == nil {
+			accepted = types.MakeArray(1)
+		}
+		accepted.Append(name)
+	}
+	return accepted
 }
 
 func appendReplicaSetHello(response *types.Document, state topology.Snapshot) {
