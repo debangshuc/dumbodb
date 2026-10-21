@@ -567,7 +567,7 @@ func decompress(payload []byte) (wire.OpCode, []byte, error) {
 	if size < 0 || size > wire.MaxMsgLen-wire.MsgHeaderLen {
 		return 0, nil, fmt.Errorf("invalid compressed MongoDB message size %d", size)
 	}
-	body, err := decompressBody(Compressor(payload[8]), payload[9:])
+	body, err := decompressBody(Compressor(payload[8]), payload[9:], size)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -603,11 +603,20 @@ func compress(compressor Compressor, body []byte) ([]byte, error) {
 	}
 }
 
-func decompressBody(compressor Compressor, payload []byte) ([]byte, error) {
+// decompressBody never produces more than size bytes. snappy.Decode allocates
+// the length its stream declares, so that length is checked first.
+func decompressBody(compressor Compressor, payload []byte, size int) ([]byte, error) {
 	switch compressor {
 	case CompressorNoop:
 		return append([]byte(nil), payload...), nil
 	case CompressorSnappy:
+		declared, err := snappy.DecodedLen(payload)
+		if err != nil {
+			return nil, fmt.Errorf("decompressing MongoDB snappy message: %w", err)
+		}
+		if declared != size {
+			return nil, fmt.Errorf("snappy MongoDB message declares %d bytes, want %d", declared, size)
+		}
 		body, err := snappy.Decode(nil, payload)
 		if err != nil {
 			return nil, fmt.Errorf("decompressing MongoDB snappy message: %w", err)
@@ -619,7 +628,7 @@ func decompressBody(compressor Compressor, payload []byte) ([]byte, error) {
 			return nil, fmt.Errorf("opening MongoDB zlib message: %w", err)
 		}
 		defer reader.Close()
-		body, err := io.ReadAll(io.LimitReader(reader, wire.MaxMsgLen-wire.MsgHeaderLen+1))
+		body, err := io.ReadAll(io.LimitReader(reader, int64(size)+1))
 		if err != nil {
 			return nil, fmt.Errorf("decompressing MongoDB zlib message: %w", err)
 		}
