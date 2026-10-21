@@ -832,7 +832,7 @@ func openDatabaseStore(ctx context.Context, dbDir string) (*nbs.GenerationalNBS,
 	}
 
 	oldgenDir := filepath.Join(dbDir, "oldgen")
-	if err := os.MkdirAll(oldgenDir, 0o755); err != nil {
+	if err := os.MkdirAll(oldgenDir, 0o700); err != nil {
 		_ = newGenSt.Close()
 		return nil, fmt.Errorf("creating oldgen directory: %w", err)
 	}
@@ -888,7 +888,7 @@ func (b *Backend) getOrOpenDBLocked(ctx context.Context, dbName string, create b
 			fmt.Errorf("database %q is a reserved system database and cannot be created", dbName))
 	}
 
-	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+	if err := os.MkdirAll(dbDir, 0o700); err != nil {
 		return nil, false, fmt.Errorf("creating db directory for %q: %w", dbName, err)
 	}
 

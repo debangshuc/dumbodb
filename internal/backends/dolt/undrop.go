@@ -42,7 +42,7 @@ func (b *Backend) preservedRoot() string {
 // rename a dropped database into. Caller must hold b.mu.
 func (b *Backend) preservedDest(name string) (string, error) {
 	parent := filepath.Join(b.preservedRoot(), name)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
+	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return "", err
 	}
 
@@ -197,7 +197,7 @@ func (b *Backend) UndropDatabase(_ context.Context, params *backends.UndropParam
 // creating dst if needed. Only directories and regular files are supported
 // (Dolt NBS stores contain nothing else).
 func copyTree(src, dst string) error {
-	if err := os.MkdirAll(dst, 0o755); err != nil {
+	if err := os.MkdirAll(dst, 0o700); err != nil {
 		return err
 	}
 	entries, err := os.ReadDir(src)
