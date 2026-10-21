@@ -17,6 +17,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/FerretDB/wire"
@@ -188,6 +189,9 @@ func (h *Handler) authorize(ctx context.Context, msg *wire.OpMsg) error {
 	}
 	if command == "usersInfo" {
 		return h.authorizeUsersInfo(ctx, msg, db)
+	}
+	if command == "rolesInfo" {
+		return h.authorizeRolesInfo(ctx, msg, db)
 	}
 	if command == "renameCollection" {
 		return h.authorizeRenameCollection(ctx, msg, db, collection)
@@ -1071,6 +1075,57 @@ func (h *Handler) authorizeUsersInfo(ctx context.Context, msg *wire.OpMsg, db st
 		}
 		if !canView(authz.DatabaseResource(p.db)) {
 			return unauthorizedCommandError(msg, "usersInfo", db)
+		}
+	}
+
+	return nil
+}
+
+// authorizeRolesInfo requires viewRole on the database of every role named,
+// except roles granted to the caller directly, as MongoDB does. Listing all
+// roles of a database requires viewRole on it.
+func (h *Handler) authorizeRolesInfo(ctx context.Context, msg *wire.OpMsg, db string) error {
+	document, err := opMsgDocument(msg)
+	if err != nil {
+		return err
+	}
+
+	privs, err := h.effectivePrivileges(ctx)
+	if err != nil {
+		return err
+	}
+
+	var requested []authz.Role
+	switch arg := must.NotFail(document.Get("rolesInfo")).(type) {
+	case string:
+		requested = []authz.Role{{Role: arg, DB: db}}
+	case *types.Document:
+		requested = []authz.Role{roleRefFromValue(arg, db)}
+	case *types.Array:
+		for i := range arg.Len() {
+			requested = append(requested, roleRefFromValue(must.NotFail(arg.Get(i)), db))
+		}
+	default:
+		if privs.Authorized(authz.ActionViewRole, authz.DatabaseResource(db)) {
+			return nil
+		}
+		return unauthorizedCommandError(msg, "rolesInfo", db)
+	}
+
+	user, _, _, userDB := conninfo.Get(ctx).Auth()
+	var granted []authz.Role
+	if user != "" {
+		if granted, err = h.loadUserRoles(ctx, userDB, user); err != nil {
+			return err
+		}
+	}
+
+	for _, role := range requested {
+		if role.Role == "" || slices.Contains(granted, role) {
+			continue
+		}
+		if !privs.Authorized(authz.ActionViewRole, authz.DatabaseResource(role.DB)) {
+			return unauthorizedCommandError(msg, "rolesInfo", db)
 		}
 	}
 
