@@ -490,13 +490,24 @@ func (c *conn) route(connCtx context.Context, reqHeader *wire.MsgHeader, reqBody
 
 		resHeader.OpCode = wire.OpCodeMsg
 
-		// decoded successfully already in [run] [wire.ReadMessage] [UnmarshalBinaryNocopy] [check]
-		doc := must.NotFail(msg.RawSection0().Decode())
+		connCtx, span = otel.Tracer("").Start(connCtx, "")
+
+		// The wire library accepts an OP_MSG with only document sequences.
+		section0 := msg.RawSection0()
+		if section0 == nil {
+			err = handlererrors.NewCommandErrorMsg(handlererrors.ErrOpMsgNoBody, "OP_MSG messages must have a body")
+			break
+		}
+
+		// The wire library only checked the body's length.
+		doc, decodeErr := section0.Decode()
+		if decodeErr != nil {
+			err = handlererrors.NewCommandErrorMsg(handlererrors.ErrInvalidBSON, "Invalid BSON in OP_MSG body: "+decodeErr.Error())
+			break
+		}
 
 		var typedDoc *types.Document
 		typedDoc, err = bson.ToDocument(doc)
-
-		connCtx, span = otel.Tracer("").Start(connCtx, "")
 
 		command = doc.Command()
 		cmd := c.h.Commands()[command]

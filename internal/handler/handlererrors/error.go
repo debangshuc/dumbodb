@@ -63,6 +63,9 @@ const (
 
 	ErrIllegalOperation = ErrorCode(20) // IllegalOperation
 
+	// ErrInvalidBSON indicates a request document that is not valid BSON.
+	ErrInvalidBSON = ErrorCode(22) // InvalidBSON
+
 	// ErrNamespaceNotFound indicates that a collection is not found.
 	ErrNamespaceNotFound = ErrorCode(26) // NamespaceNotFound
 
@@ -258,6 +261,9 @@ const (
 
 	// ErrSliceThirdArgNotPositive indicates a negative count after a position in $slice.
 	ErrSliceThirdArgNotPositive = ErrorCode(28729) // Location28729
+
+	// ErrOpMsgNoBody indicates an OP_MSG without a kind-0 body section.
+	ErrOpMsgNoBody = ErrorCode(40587) // Location40587
 
 	// ErrStageUnsetNoPath indicates that $unwind aggregation stage is empty.
 	ErrStageUnsetNoPath = ErrorCode(31119) // Location31119
