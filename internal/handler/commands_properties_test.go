@@ -142,6 +142,15 @@ func TestCommands_NoCustomReplicationCommands(t *testing.T) {
 	}
 }
 
+// debugError was inherited from FerretDB, has no MongoDB counterpart, and lets
+// any client with auth off panic the server on purpose.
+func TestCommands_NoDebugErrorCommand(t *testing.T) {
+	h := handlerForTest(t)
+	if _, ok := h.Commands()["debugError"]; ok {
+		t.Fatal("debugError is registered")
+	}
+}
+
 func TestCommands_ReplicationRejectsMutations(t *testing.T) {
 	h := configuredReplicationHandler(t)
 	h.initCommands()

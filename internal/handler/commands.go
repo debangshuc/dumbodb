@@ -101,7 +101,6 @@ func (h *Handler) initCommands() {
 		"create":                   {Handler: h.MsgCreate, MutatesState: alwaysMutatesState, Help: "Creates the collection."},
 		"currentOp":                {Handler: h.MsgCurrentOp, Help: "Returns information about operations currently in progress."},
 		"dataSize":                 {Handler: h.MsgDataSize, Help: "Returns the size of the collection in bytes."},
-		"debugError":               {Handler: h.MsgDebugError, Help: "Returns error for debugging."},
 		"delete":                   {Handler: h.MsgDelete, MutatesState: alwaysMutatesState, WritesData: true, Help: "Deletes documents matched by the query."},
 		"distinct":                 {Handler: h.MsgDistinct, Help: "Returns an array of distinct values for the given field."},
 		"dropIndexes":              {Handler: h.MsgDropIndexes, MutatesState: alwaysMutatesState, Help: "Drops indexes on a collection."},
