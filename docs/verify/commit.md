@@ -18,6 +18,7 @@ scenario top to bottom. Each section builds on the previous setup.
 | `author`     | string   | no       | `"dumbodb <dumbodb@dumbodb>"` | `Name <email>` of the commit author. **Only accepted with `--auth` off.**     |
 | `timestamp`  | datetime | no       | current time | Commit timestamp (BSON Date)                                                 |
 | `allowEmpty` | bool     | no       | `false`      | When true, create a commit even if the working set has no changes vs HEAD    |
+| `amend`      | bool     | no       | `false`      | When true, replace HEAD with a commit on HEAD's parents. Omitting `message` keeps HEAD's message |
 
 > **Authentication note.** Under `--auth`, `doltCommit` **rejects** a client-supplied
 > `author`/`committer` with `IDLUnknownField` (40415): the server stamps the
@@ -288,6 +289,40 @@ Key checks:
 
 ---
 
+## Scenario 8: Amend replaces HEAD
+
+`amend: true` builds the new commit on HEAD's parents and moves the branch to it,
+as `dolt commit --amend` does. HEAD's own commit drops out of the log. Omitting
+`message` keeps HEAD's message, and an amend needs no working changes.
+
+```js
+const before = db.runCommand({ doltLog: 1, limit: 2 }).commits
+const headBefore = before[0].commitId
+const parentBefore = before[0].parent1
+
+db.orders.insertOne({ _id: 80, label: "amend", v: 80 })
+const r8 = db.runCommand({ doltCommit: 1, amend: true, author: "alice <alice@acme.com>" })
+printjson(r8)
+// Expected: { commitId: "<new hash>", message: "fixed-time commit", ..., ok: 1 }
+
+const after = db.runCommand({ doltLog: 1, limit: 2 }).commits
+print("head replaced:", after[0].commitId === r8.commitId && after[0].commitId !== headBefore)
+print("same parent:", after[0].parent1 === parentBefore)
+print("old head gone:", after[1].commitId === parentBefore)
+// Expected: true, true, true
+
+const r8b = db.runCommand({ doltCommit: 1, amend: true, message: "reworded", author: "alice <alice@acme.com>" })
+// Expected: { commitId: "<another new hash>", message: "reworded", ..., ok: 1 } with no working changes
+```
+
+Key checks:
+- `r8.message` is HEAD's previous message
+- the amended commit has HEAD's previous parent, and the old HEAD is no longer in the log
+- `_id: 80` is committed: a following bare `doltCommit` fails with "nothing to commit"
+- `r8b` succeeds with no working changes and records the new message
+
+---
+
 ## Quick Reference
 
 | Scenario | Command | Key outcome |
@@ -300,6 +335,7 @@ Key checks:
 | Use hash in diff | `{ doltDiff: 1, from: hash1, to: hash2 }` | Shows changes between commits |
 | Custom author | Pass `author: "bob"` | Response echoes `"bob"`; doltLog shows stored `"bob <bob@dumbodb>"` |
 | Custom timestamp | Pass `timestamp: new Date("2020-06-15")` | Response and doltLog echo fixed time |
+| Amend | `{ doltCommit: 1, amend: true }` | HEAD replaced by a commit on its parents; message kept unless given |
 
 - `hash` is a Dolt commit hash (non-empty string).
 - `branch` reflects the connection's branch, not the database base name.

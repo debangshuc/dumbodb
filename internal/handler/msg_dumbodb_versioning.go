@@ -683,7 +683,7 @@ func (h *Handler) MsgDumboDBCommit(connCtx context.Context, msg *wire.OpMsg) (*w
 		return nil, err
 	}
 
-	if err = common.RejectUnknownFields(document, "message", "author", "timestamp", "allowEmpty"); err != nil {
+	if err = common.RejectUnknownFields(document, "message", "author", "timestamp", "allowEmpty", "amend"); err != nil {
 		return nil, err
 	}
 
@@ -720,6 +720,11 @@ func (h *Handler) MsgDumboDBCommit(connCtx context.Context, msg *wire.OpMsg) (*w
 		return nil, err
 	}
 
+	amend, err := common.GetOptionalBoolOrIntParam(document, "amend", false)
+	if err != nil {
+		return nil, err
+	}
+
 	vb := h.versioningBackend()
 	if vb == nil {
 		return nil, handlererrors.NewCommandErrorMsg(
@@ -741,6 +746,7 @@ func (h *Handler) MsgDumboDBCommit(connCtx context.Context, msg *wire.OpMsg) (*w
 		Committer:  committer,
 		Timestamp:  ts,
 		AllowEmpty: allowEmpty,
+		Amend:      amend,
 	})
 	if err != nil {
 		if errors.Is(err, backends.ErrEmptyCommit) {

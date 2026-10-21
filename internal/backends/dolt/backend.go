@@ -477,8 +477,8 @@ func NewBackend(dataDir string, l *slog.Logger, autoCommit, sessionIsolation boo
 }
 
 func newBackend(dataDir string, l *slog.Logger, autoCommit, sessionIsolation bool, sessionTimeout, sessionSweepPeriod time.Duration) (*Backend, error) {
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating data directory: %w", err)
+	if err := checkDataDirExists(dataDir); err != nil {
+		return nil, err
 	}
 
 	b := &Backend{
@@ -525,7 +525,13 @@ func newBackend(dataDir string, l *slog.Logger, autoCommit, sessionIsolation boo
 	// empty. Without this, compact on a non-existent collection in admin
 	// incorrectly returns "database does not exist" instead of "collection
 	// does not exist".
+	// The admin store's noms LOCK is held for the life of the process, so it
+	// doubles as the exclusive lock on dataDir.
 	if _, err := b.getOrOpenDB(context.Background(), "admin", true); err != nil {
+		if errors.Is(err, nbs.ErrDatabaseLocked) {
+			return nil, fmt.Errorf("data directory %q is in use by another process (could not lock %s): %w",
+				dataDir, filepath.Join(dataDir, "admin", "LOCK"), err)
+		}
 		return nil, fmt.Errorf("initializing admin database: %w", err)
 	}
 
@@ -533,6 +539,20 @@ func newBackend(dataDir string, l *slog.Logger, autoCommit, sessionIsolation boo
 	go b.droppedDatabaseGCLoop()
 
 	return b, nil
+}
+
+// checkDataDirExists refuses a missing dataDir rather than creating it, as
+// mongod does, so a mistyped path or unmounted volume is not served as empty.
+func checkDataDirExists(dataDir string) error {
+	info, err := os.Stat(dataDir)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("data directory %q not found: create the missing directory or specify another path using the --data-dir command line option", dataDir)
+	} else if err != nil {
+		return fmt.Errorf("checking data directory %q: %w", dataDir, err)
+	} else if !info.IsDir() {
+		return fmt.Errorf("data directory %q is not a directory", dataDir)
+	}
+	return nil
 }
 
 func (b *Backend) sessionSweepLoop() {
@@ -806,7 +826,7 @@ func (b *Backend) getOrOpenDB(ctx context.Context, dbName string, create bool) (
 func openDatabaseStore(ctx context.Context, dbDir string) (*nbs.GenerationalNBS, error) {
 	q := nbs.NewUnlimitedMemQuotaProvider()
 
-	newGenSt, err := nbs.NewLocalJournalingStore(ctx, dolttypes.Format_DOLT.VersionString(), dbDir, q, false, nil)
+	newGenSt, err := nbs.NewLocalJournalingStoreWithOptions(ctx, dolttypes.Format_DOLT.VersionString(), dbDir, q, false, nil, nbs.JournalingStoreOptions{FailOnLockTimeout: true})
 	if err != nil {
 		return nil, fmt.Errorf("opening newgen NBS store: %w", err)
 	}
@@ -1150,8 +1170,8 @@ func (b *Backend) AutoCommit(ctx context.Context, dbName, branch, message, autho
 
 // commitCollectionsAMAs creates a new dolt commit with the given collections
 // AddressMap as its root value, using the provided author name and timestamp.
-// Returns the updated dataset and the (unchanged) AM.
-func commitCollectionsAMAs(ctx context.Context, datasDB datas.Database, ds datas.Dataset, am prolly.AddressMap, desc, authorName, committerName string, ts time.Time) (datas.Dataset, prolly.AddressMap, error) {
+// opts.Meta is overwritten. Returns the updated dataset and the (unchanged) AM.
+func commitCollectionsAMAs(ctx context.Context, datasDB datas.Database, ds datas.Dataset, am prolly.AddressMap, desc, authorName, committerName string, ts time.Time, opts datas.CommitOptions) (datas.Dataset, prolly.AddressMap, error) {
 	var err error
 	if ds.ID() == "" {
 		ds, err = datasDB.GetDataset(ctx, mainDataset)
@@ -1160,20 +1180,58 @@ func commitCollectionsAMAs(ctx context.Context, datasDB datas.Database, ds datas
 		}
 	}
 
-	meta, err := commitMetaAC(authorName, committerName, desc, ts)
+	opts.Meta, err = commitMetaAC(authorName, committerName, desc, ts)
 	if err != nil {
 		return datas.Dataset{}, am, err
 	}
 
 	rtvlMsg := buildRootValueFlatbuffer(am)
-	newDS, err := datasDB.Commit(ctx, ds, dolttypes.SerialMessage(rtvlMsg), datas.CommitOptions{
-		Meta: meta,
-	})
+	newDS, err := datasDB.Commit(ctx, ds, dolttypes.SerialMessage(rtvlMsg), opts)
 	if err != nil {
 		return datas.Dataset{}, am, err
 	}
 
 	return newDS, am, nil
+}
+
+// commitOptionsFor returns the commit options, less Meta, and the message for
+// a commit on ds. As with dolt commit --amend, an amend takes the head's
+// parents, and its message when params.Message is empty.
+func commitOptionsFor(ctx context.Context, vs *dolttypes.ValueStore, ds datas.Dataset, params *backends.CommitParams) (datas.CommitOptions, string, error) {
+	if !params.Amend {
+		message := params.Message
+		if message == "" {
+			message = "dolt commit"
+		}
+		return datas.CommitOptions{}, message, nil
+	}
+
+	headAddr, ok := ds.MaybeHeadAddr()
+	if !ok {
+		return datas.CommitOptions{}, "", fmt.Errorf("cannot amend: %q has no commits", ds.ID())
+	}
+	head, err := datas.LoadCommitAddr(ctx, vs, headAddr)
+	if err != nil {
+		return datas.CommitOptions{}, "", fmt.Errorf("loading commit to amend: %w", err)
+	}
+	parents, err := datas.GetCommitParents(ctx, vs, head.NomsValue())
+	if err != nil {
+		return datas.CommitOptions{}, "", fmt.Errorf("loading parents of commit to amend: %w", err)
+	}
+	parentAddrs := make([]hash.Hash, len(parents))
+	for i, parent := range parents {
+		parentAddrs[i] = parent.Addr()
+	}
+
+	message := params.Message
+	if message == "" {
+		meta, err := datas.GetCommitMeta(ctx, head.NomsValue())
+		if err != nil {
+			return datas.CommitOptions{}, "", fmt.Errorf("loading message of commit to amend: %w", err)
+		}
+		message = meta.Description
+	}
+	return datas.CommitOptions{Parents: parentAddrs, AmendedCommit: headAddr}, message, nil
 }
 
 // migrateADRMtoSTRT converts a legacy ADRM-rooted NBS store to STRT format
@@ -1354,11 +1412,6 @@ func (b *Backend) DumboDBCommit(ctx context.Context, params *backends.CommitPara
 			fmt.Errorf("DumboDBCommit: database %q does not exist", params.DBName))
 	}
 
-	message := params.Message
-	if message == "" {
-		message = "dolt commit"
-	}
-
 	ts := params.Timestamp
 	if ts.IsZero() {
 		ts = time.Now()
@@ -1438,7 +1491,7 @@ func (b *Backend) DumboDBCommit(ctx context.Context, params *backends.CommitPara
 		if fbErr != nil {
 			return nil, fmt.Errorf("DumboDBCommit: loading WS for db %q: %w", params.DBName, fbErr)
 		}
-		if !params.AllowEmpty {
+		if !params.AllowEmpty && !params.Amend {
 			headAM, err := db.headRootAM(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("DumboDBCommit: reading HEAD AM for db %q: %w", params.DBName, err)
@@ -1460,6 +1513,10 @@ func (b *Backend) DumboDBCommit(ctx context.Context, params *backends.CommitPara
 		if dsErr != nil {
 			return nil, fmt.Errorf("DumboDBCommit: resolving main dataset for db %q: %w", params.DBName, dsErr)
 		}
+		opts, message, err := commitOptionsFor(ctx, db.vs, mainDS, params)
+		if err != nil {
+			return nil, fmt.Errorf("DumboDBCommit: %w", err)
+		}
 		workingRV, rvErr := workingRootViaSession(ctx, sess, fallbackWS, params.DBName, defaultBranch)
 		if rvErr != nil {
 			return nil, fmt.Errorf("DumboDBCommit: reading working root for db %q: %w", params.DBName, rvErr)
@@ -1468,7 +1525,7 @@ func (b *Backend) DumboDBCommit(ctx context.Context, params *backends.CommitPara
 		if amErr != nil {
 			return nil, fmt.Errorf("DumboDBCommit: reading working AM for db %q: %w", params.DBName, amErr)
 		}
-		newDS, _, err := commitCollectionsAMAs(ctx, db.datasDB, mainDS, workingAM, message, params.Author, params.Committer, ts)
+		newDS, _, err := commitCollectionsAMAs(ctx, db.datasDB, mainDS, workingAM, message, params.Author, params.Committer, ts, opts)
 		if err != nil {
 			return nil, fmt.Errorf("DumboDBCommit: committing db %q: %w", params.DBName, err)
 		}
@@ -1506,7 +1563,7 @@ func (b *Backend) DumboDBCommit(ctx context.Context, params *backends.CommitPara
 		return nil, fmt.Errorf("DumboDBCommit: loading branch AM for %q: %w", branch, err)
 	}
 
-	if !params.AllowEmpty {
+	if !params.AllowEmpty && !params.Amend {
 		branchHeadAM, err := headRootAMForBranch(ctx, db, branch)
 		if err != nil {
 			return nil, fmt.Errorf("DumboDBCommit: reading HEAD AM for branch %q: %w", branch, err)
@@ -1516,13 +1573,17 @@ func (b *Backend) DumboDBCommit(ctx context.Context, params *backends.CommitPara
 		}
 	}
 
-	meta, err := commitMetaAC(params.Author, params.Committer, message, ts)
+	opts, message, err := commitOptionsFor(ctx, db.vs, branchDS, params)
+	if err != nil {
+		return nil, fmt.Errorf("DumboDBCommit: %w", err)
+	}
+	opts.Meta, err = commitMetaAC(params.Author, params.Committer, message, ts)
 	if err != nil {
 		return nil, fmt.Errorf("DumboDBCommit: building commit meta for branch %q: %w", branch, err)
 	}
 
 	rtvlMsg := buildRootValueFlatbuffer(branchAM)
-	newDS, err := db.datasDB.Commit(ctx, branchDS, dolttypes.SerialMessage(rtvlMsg), datas.CommitOptions{Meta: meta})
+	newDS, err := db.datasDB.Commit(ctx, branchDS, dolttypes.SerialMessage(rtvlMsg), opts)
 	if err != nil {
 		return nil, fmt.Errorf("DumboDBCommit: committing branch %q: %w", branch, err)
 	}

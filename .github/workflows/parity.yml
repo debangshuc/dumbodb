@@ -70,6 +70,7 @@ jobs:
 
       - name: Start DumboDB
         run: |
+          mkdir -p /tmp/dumbodb-data
           dumbodb --port 27018 --data-dir /tmp/dumbodb-data > /tmp/dumbodb.log 2>&1 &
           echo $! > /tmp/dumbodb.pid
 

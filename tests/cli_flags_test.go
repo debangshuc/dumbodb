@@ -168,6 +168,25 @@ func TestSessionIsolationFlagDisabled(t *testing.T) {
 		"the disabled flag must be rejected as undefined; got: %s", out)
 }
 
+// TestMissingDataDirRefusesToStart verifies that, as with mongod, a
+// nonexistent --data-dir is an error and is not created.
+func TestMissingDataDirRefusesToStart(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "dumbodb")
+	build := exec.Command("go", "build", "-o", binary, "./cmd/dumbodb/")
+	build.Dir = repoRoot()
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("building binary: %v\n%s", err, out)
+	}
+
+	missingDataDir := filepath.Join(t.TempDir(), "nope")
+	cmd := exec.Command(binary, "--addr", "127.0.0.1:0", "--data-dir", missingDataDir)
+	out, err := cmd.CombinedOutput()
+	require.Error(t, err, "server must exit non-zero when --data-dir does not exist")
+	assert.Contains(t, string(out), "not found", "got: %s", out)
+	assert.Contains(t, string(out), missingDataDir, "got: %s", out)
+	assert.NoDirExists(t, missingDataDir)
+}
+
 func TestTLSFlags(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "dumbodb")
 	build := exec.Command("go", "build", "-o", binary, "./cmd/dumbodb/")
