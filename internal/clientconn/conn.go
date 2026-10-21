@@ -390,9 +390,13 @@ func (c *conn) run(ctx context.Context) (err error) {
 				if err = bufw.Flush(); err != nil {
 					return
 				}
+				sentAt := time.Now()
 				responseMsg, ok := resBody.(*wire.OpMsg)
 				if c.mode != NormalMode || !ok || !responseMsg.Flags.FlagSet(wire.OpMsgMoreToCome) {
 					break
+				}
+				if err = waitForNextExhaustResponse(ctx, sentAt); err != nil {
+					return
 				}
 				responseTo = resHeader.RequestID
 				if reqBody, err = nextExhaustRequest(reqBody, responseMsg); err != nil {
@@ -411,6 +415,23 @@ func (c *conn) run(ctx context.Context) (err error) {
 			err = errors.New("fatal error")
 			return
 		}
+	}
+}
+
+// minExhaustInterval spaces exhaust responses. Drivers never check a server
+// more often than minHeartbeatFrequencyMS (500ms), and without a floor an
+// exhaust hello with maxAwaitTimeMS:0 streams responses as fast as the client
+// reads them.
+const minExhaustInterval = 500 * time.Millisecond
+
+func waitForNextExhaustResponse(ctx context.Context, sentAt time.Time) error {
+	timer := time.NewTimer(time.Until(sentAt.Add(minExhaustInterval)))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	case <-timer.C:
+		return nil
 	}
 }
 
