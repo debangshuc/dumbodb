@@ -15,6 +15,7 @@ Start a server with access control on and a **fresh, empty** data directory (so
 the localhost exception applies and no users pre-exist):
 
 ```bash
+mkdir -p /tmp/authtest
 dumbodb --auth --addr 127.0.0.1:27017 --data-dir /tmp/authtest
 ```
 

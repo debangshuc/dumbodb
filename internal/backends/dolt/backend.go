@@ -477,8 +477,8 @@ func NewBackend(dataDir string, l *slog.Logger, autoCommit, sessionIsolation boo
 }
 
 func newBackend(dataDir string, l *slog.Logger, autoCommit, sessionIsolation bool, sessionTimeout, sessionSweepPeriod time.Duration) (*Backend, error) {
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating data directory: %w", err)
+	if err := checkDataDirExists(dataDir); err != nil {
+		return nil, err
 	}
 
 	b := &Backend{
@@ -539,6 +539,20 @@ func newBackend(dataDir string, l *slog.Logger, autoCommit, sessionIsolation boo
 	go b.droppedDatabaseGCLoop()
 
 	return b, nil
+}
+
+// checkDataDirExists refuses a missing dataDir rather than creating it, as
+// mongod does, so a mistyped path or unmounted volume is not served as empty.
+func checkDataDirExists(dataDir string) error {
+	info, err := os.Stat(dataDir)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("data directory %q not found: create the missing directory or specify another path using the --data-dir command line option", dataDir)
+	} else if err != nil {
+		return fmt.Errorf("checking data directory %q: %w", dataDir, err)
+	} else if !info.IsDir() {
+		return fmt.Errorf("data directory %q is not a directory", dataDir)
+	}
+	return nil
 }
 
 func (b *Backend) sessionSweepLoop() {

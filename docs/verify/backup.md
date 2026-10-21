@@ -37,6 +37,7 @@ and `mongosh`. Remove any backups left by an earlier run.
 
 ```bash
 rm -rf /tmp/dumbo-a /tmp/dumbo-b /tmp/dumbo-backup-*
+mkdir -p /tmp/dumbo-a /tmp/dumbo-b
 dumbodb --data-dir /tmp/dumbo-a --port 27017 &   # server A
 dumbodb --data-dir /tmp/dumbo-b --port 27018 &   # server B
 ```
