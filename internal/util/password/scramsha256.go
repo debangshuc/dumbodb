@@ -17,7 +17,8 @@ package password
 import (
 	"crypto/rand"
 	"crypto/sha256"
-	"fmt"
+	"errors"
+	"strings"
 
 	"github.com/FerretDB/wire/wirebson"
 	"github.com/xdg-go/stringprep"
@@ -59,10 +60,18 @@ func scramSHA256HashParams(password Password, salt []byte, params *scramParams) 
 
 	prepPassword, err := stringprep.SASLprep.Prepare(password.Password())
 	if err != nil {
-		return nil, fmt.Errorf("cannot SASLprepare password '%s': %v", password, err)
+		return nil, newSASLprepError(err)
 	}
 
 	saltedPassword := pbkdf2.Key([]byte(prepPassword), salt, params.iterationCount, sha256.Size, sha256.New)
 
 	return scramDoc(sha256.New, saltedPassword, salt, params)
+}
+
+func newSASLprepError(err error) *SASLprepError {
+	var prepErr stringprep.Error
+	if errors.As(err, &prepErr) && strings.HasPrefix(prepErr.Msg, "BiDi") {
+		return &SASLprepError{ICUError: "U_STRINGPREP_CHECK_BIDI_ERROR"}
+	}
+	return &SASLprepError{ICUError: "U_STRINGPREP_PROHIBITED_ERROR"}
 }
