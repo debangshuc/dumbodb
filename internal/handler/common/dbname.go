@@ -21,17 +21,15 @@ import (
 	"github.com/dolthub/dumbodb/internal/handler/handlererrors"
 )
 
-// invalidDatabaseNameChars are the characters MongoDB forbids in a database
-// name. User and role _ids are "<db>.<name>", so allowing '.' would let one
-// database's principal alias another's.
-const invalidDatabaseNameChars = "/\\. \"$\x00"
+// invalidDatabaseNameChars are the characters MongoDB forbids in the database
+// name of every command. User and role _ids are "<db>.<name>", so allowing '.'
+// would let one database's principal alias another's. MongoDB also forbids '$'
+// but only when creating a database, which the backend already refuses.
+const invalidDatabaseNameChars = "/\\. \"\x00"
 
-// ValidateDatabaseName rejects a database name MongoDB would reject, with
-// MongoDB's error. "$external" is allowed.
+// ValidateDatabaseName rejects a database name MongoDB would reject for any
+// command, with MongoDB's error.
 func ValidateDatabaseName(name string) error {
-	if name == "$external" {
-		return nil
-	}
 	if i := strings.IndexAny(name, invalidDatabaseNameChars); i >= 0 {
 		return handlererrors.NewCommandErrorMsg(
 			handlererrors.ErrInvalidNamespace,
