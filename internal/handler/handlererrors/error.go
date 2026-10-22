@@ -63,6 +63,9 @@ const (
 
 	ErrIllegalOperation = ErrorCode(20) // IllegalOperation
 
+	// ErrDatabaseDifferCase indicates a database name differing only in case from an existing one.
+	ErrDatabaseDifferCase = ErrorCode(13297) // DatabaseDifferCase
+
 	// ErrInvalidBSON indicates a request document that is not valid BSON.
 	ErrInvalidBSON = ErrorCode(22) // InvalidBSON
 

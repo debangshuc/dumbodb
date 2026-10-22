@@ -762,7 +762,11 @@ func (b *Backend) dropDatabaseLocked(params *backends.DropDatabaseParams) error 
 	}
 	dbDir := filepath.Join(b.dataDir, params.Name)
 
-	if _, err := os.Stat(dbDir); os.IsNotExist(err) {
+	existing, err := b.differentlyCasedDatabase(params.Name)
+	if err != nil {
+		return err
+	}
+	if _, statErr := os.Stat(dbDir); existing != "" || os.IsNotExist(statErr) {
 		return backends.NewError(backends.ErrorCodeDatabaseDoesNotExist,
 			fmt.Errorf("database %q does not exist", params.Name))
 	}
@@ -795,6 +799,48 @@ func (b *Backend) dropDatabaseLocked(params *backends.DropDatabaseParams) error 
 // implement and must not let users create. admin is excluded (DumboDB uses it).
 func isReservedDatabase(name string) bool {
 	return name == "config" || name == "local"
+}
+
+// systemDatabaseNames are reserved in every case variant, whether or not the
+// database exists yet.
+var systemDatabaseNames = []string{"admin", "config", "local"}
+
+// differentlyCasedDatabase returns the existing or system database whose name
+// differs from name only in case, or "". On a case-insensitive filesystem both
+// names resolve to the same directory.
+func (b *Backend) differentlyCasedDatabase(name string) (string, error) {
+	for _, system := range systemDatabaseNames {
+		if system != name && strings.EqualFold(system, name) {
+			return system, nil
+		}
+	}
+
+	entries, err := os.ReadDir(b.dataDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && entry.Name() != name && strings.EqualFold(entry.Name(), name) {
+			return entry.Name(), nil
+		}
+	}
+	return "", nil
+}
+
+// checkNewDatabaseName refuses to create a database whose name differs only in
+// case from an existing or system database, as MongoDB does.
+func (b *Backend) checkNewDatabaseName(name string) error {
+	existing, err := b.differentlyCasedDatabase(name)
+	if err != nil {
+		return err
+	}
+	if existing != "" {
+		return backends.NewDatabaseDifferCaseError(existing, name)
+	}
+	return nil
 }
 
 func (b *Backend) getOrOpenDB(ctx context.Context, dbName string, create bool) (*dbState, error) {
@@ -881,6 +927,15 @@ func (b *Backend) getOrOpenDBLocked(ctx context.Context, dbName string, create b
 		if _, err := os.Stat(dbDir); os.IsNotExist(err) {
 			return nil, false, nil
 		}
+		existing, err := b.differentlyCasedDatabase(dbName)
+		if err != nil {
+			return nil, false, err
+		}
+		if existing != "" {
+			return nil, false, nil
+		}
+	} else if err := b.checkNewDatabaseName(dbName); err != nil {
+		return nil, false, err
 	}
 
 	if create && isReservedDatabase(dbName) {

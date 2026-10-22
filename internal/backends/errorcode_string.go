@@ -10,23 +10,24 @@ func _() {
 	var x [1]struct{}
 	_ = x[ErrorCodeDatabaseNameIsInvalid-1]
 	_ = x[ErrorCodeDatabaseDoesNotExist-2]
-	_ = x[ErrorCodeCollectionNameIsInvalid-3]
-	_ = x[ErrorCodeCollectionDoesNotExist-4]
-	_ = x[ErrorCodeCollectionAlreadyExists-5]
-	_ = x[ErrorCodeInsertDuplicateID-6]
-	_ = x[ErrorCodeReadOnlyDatabase-7]
-	_ = x[ErrorCodeWriteConflict-8]
-	_ = x[ErrorCodeReadOnlyCollection-9]
+	_ = x[ErrorCodeDatabaseDifferCase-3]
+	_ = x[ErrorCodeCollectionNameIsInvalid-4]
+	_ = x[ErrorCodeCollectionDoesNotExist-5]
+	_ = x[ErrorCodeCollectionAlreadyExists-6]
+	_ = x[ErrorCodeInsertDuplicateID-7]
+	_ = x[ErrorCodeReadOnlyDatabase-8]
+	_ = x[ErrorCodeWriteConflict-9]
+	_ = x[ErrorCodeReadOnlyCollection-10]
 }
 
-const _ErrorCode_name = "ErrorCodeDatabaseNameIsInvalidErrorCodeDatabaseDoesNotExistErrorCodeCollectionNameIsInvalidErrorCodeCollectionDoesNotExistErrorCodeCollectionAlreadyExistsErrorCodeInsertDuplicateIDErrorCodeReadOnlyDatabaseErrorCodeWriteConflictErrorCodeReadOnlyCollection"
+const _ErrorCode_name = "ErrorCodeDatabaseNameIsInvalidErrorCodeDatabaseDoesNotExistErrorCodeDatabaseDifferCaseErrorCodeCollectionNameIsInvalidErrorCodeCollectionDoesNotExistErrorCodeCollectionAlreadyExistsErrorCodeInsertDuplicateIDErrorCodeReadOnlyDatabaseErrorCodeWriteConflictErrorCodeReadOnlyCollection"
 
-var _ErrorCode_index = [...]uint8{0, 30, 59, 91, 122, 154, 180, 205, 227, 254}
+var _ErrorCode_index = [...]uint16{0, 30, 59, 86, 118, 149, 181, 207, 232, 254, 281}
 
 func (i ErrorCode) String() string {
-	i -= 1
-	if i < 0 || i >= ErrorCode(len(_ErrorCode_index)-1) {
-		return "ErrorCode(" + strconv.FormatInt(int64(i+1), 10) + ")"
+	idx := int(i) - 1
+	if i < 1 || idx >= len(_ErrorCode_index)-1 {
+		return "ErrorCode(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _ErrorCode_name[_ErrorCode_index[i]:_ErrorCode_index[i+1]]
+	return _ErrorCode_name[_ErrorCode_index[idx]:_ErrorCode_index[idx+1]]
 }

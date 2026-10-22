@@ -16,6 +16,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -288,6 +289,7 @@ func (h *Handler) initCommands() {
 			}
 
 			res, handlerErr := next(ctx, msg)
+			handlerErr = databaseDifferCaseError(handlerErr)
 			if handlerErr == nil && res != nil {
 				res = h.postProcessResponse(ctx, msg, res)
 			}
@@ -297,6 +299,20 @@ func (h *Handler) initCommands() {
 			return res, handlerErr
 		}
 	}
+}
+
+// databaseDifferCaseError reports a backend DatabaseDifferCase error as
+// MongoDB does, whichever command reached it.
+func databaseDifferCaseError(err error) error {
+	var backendErr *backends.Error
+	if !errors.As(err, &backendErr) || backendErr.Code() != backends.ErrorCodeDatabaseDifferCase {
+		return err
+	}
+	existing, requested := backendErr.DifferCaseNames()
+	return handlererrors.NewCommandErrorMsg(
+		handlererrors.ErrDatabaseDifferCase,
+		fmt.Sprintf("db already exists with different case already have: [%s] trying to create [%s]", existing, requested),
+	)
 }
 
 // logCommand logs a finished command at DEBUG, or at INFO as "Slow query" when
