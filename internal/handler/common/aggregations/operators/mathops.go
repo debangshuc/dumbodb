@@ -715,6 +715,9 @@ func newMod(args ...any) (Operator, error) {
 	return &modOp{dividend: args[0], divisor: args[1]}, nil
 }
 
+// Process implements Operator. As in MongoDB, the remainder takes the sign of
+// the dividend and keeps integer types (int unless either operand is a long),
+// is a double when either operand is, and a Decimal128 when either is one.
 func (op *modOp) Process(doc *types.Document) (any, error) {
 	a, err := evalArgValue(op.dividend, doc)
 	if err != nil {
@@ -729,42 +732,49 @@ func (op *modOp) Process(doc *types.Document) (any, error) {
 	if a == types.Null || b == types.Null {
 		return types.Null, nil
 	}
-
-	// Preserve integer types when possible.
-	switch av := a.(type) {
-	case int32:
-		if bv, ok := b.(int32); ok {
-			if bv == 0 {
-				return nil, newOperatorError(ErrArgsInvalidLen, "$mod", "$mod by zero")
-			}
-
-			return av % bv, nil
-		}
-	case int64:
-		switch bv := b.(type) {
-		case int64:
-			if bv == 0 {
-				return nil, newOperatorError(ErrArgsInvalidLen, "$mod", "$mod by zero")
-			}
-
-			return av % bv, nil
-		case int32:
-			if bv == 0 {
-				return nil, newOperatorError(ErrArgsInvalidLen, "$mod", "$mod by zero")
-			}
-
-			return av % int64(bv), nil
-		}
+	if !isNumber(a) || !isNumber(b) {
+		return nil, mathError(handlererrors.ErrModNonNumeric, "$mod", fmt.Sprintf(
+			"$mod only supports numeric types, not %s and %s", handlerparams.AliasFromType(a), handlerparams.AliasFromType(b),
+		))
 	}
 
-	bf := toFloat64(b)
-
-	// NaN divisor: MongoDB returns NaN without error; math.Mod propagates NaN naturally.
-	if !math.IsNaN(bf) && bf == 0 {
-		return nil, newOperatorError(ErrArgsInvalidLen, "$mod", "$mod by zero")
+	_, aDec := a.(types.Decimal128)
+	_, bDec := b.(types.Decimal128)
+	if aDec || bDec {
+		x, _ := aggregations.NumberToAPD(a)
+		y, _ := aggregations.NumberToAPD(b)
+		if y.Form == apd.Finite && y.IsZero() {
+			return nil, mathError(handlererrors.ErrModByZeroDecimal, "$mod", "can't $mod by zero")
+		}
+		r := new(apd.Decimal)
+		if _, err = aggregations.DecimalWorkContext().Rem(r, x, y); err != nil {
+			r = &apd.Decimal{Form: apd.NaN}
+		}
+		return aggregations.APDToDecimal128(r), nil
 	}
 
-	return math.Mod(toFloat64(a), bf), nil
+	modByZero := mathError(handlererrors.ErrModByZero, "$mod", "can't $mod by zero")
+
+	if isIntegral(a) && isIntegral(b) {
+		divisor := toInt64(b)
+		if divisor == 0 {
+			return nil, modByZero
+		}
+		r := toInt64(a) % divisor
+		_, a32 := a.(int32)
+		_, b32 := b.(int32)
+		if a32 && b32 {
+			return int32(r), nil
+		}
+		return r, nil
+	}
+
+	divisor := toFloat64(b)
+	if divisor == 0 {
+		return nil, modByZero
+	}
+
+	return math.Mod(toFloat64(a), divisor), nil
 }
 
 var _ Operator = (*modOp)(nil)

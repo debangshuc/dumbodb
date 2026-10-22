@@ -203,8 +203,9 @@ func newDivide(args ...any) (Operator, error) {
 	return &divideOp{dividend: args[0], divisor: args[1]}, nil
 }
 
-// Process implements Operator. Returns dividend / divisor as float64.
-// Returns null if either arg is null.
+// Process implements Operator. As in MongoDB, the quotient is a double unless
+// either operand is a Decimal128, dividing by any zero is BadValue, and
+// non-numeric operands are a TypeMismatch. Returns null if either arg is null.
 func (d *divideOp) Process(doc *types.Document) (any, error) {
 	a, err := evalArgValue(d.dividend, doc)
 	if err != nil {
@@ -219,17 +220,33 @@ func (d *divideOp) Process(doc *types.Document) (any, error) {
 	if a == types.Null || b == types.Null {
 		return types.Null, nil
 	}
-
-	bf := toFloat64(b)
-	if bf == 0 {
-		return nil, newOperatorError(
-			ErrArgsInvalidLen,
-			"$divide",
-			"$divide only supports numeric types, not null",
-		)
+	if !isNumber(a) || !isNumber(b) {
+		return nil, mathError(handlererrors.ErrTypeMismatch, "$divide", fmt.Sprintf(
+			"$divide only supports numeric types, not %s and %s", handlerparams.AliasFromType(a), handlerparams.AliasFromType(b),
+		))
 	}
 
-	return toFloat64(a) / bf, nil
+	divideByZero := mathError(handlererrors.ErrBadValue, "$divide", "can't $divide by zero")
+
+	_, aDec := a.(types.Decimal128)
+	_, bDec := b.(types.Decimal128)
+	if aDec || bDec {
+		x, _ := aggregations.NumberToAPD(a)
+		y, _ := aggregations.NumberToAPD(b)
+		if y.Form == apd.Finite && y.IsZero() {
+			return nil, divideByZero
+		}
+		r := new(apd.Decimal)
+		_, _ = aggregations.DecimalWorkContext().Quo(r, x, y)
+		return aggregations.DecimalResult(r, x.Exponent-y.Exponent), nil
+	}
+
+	divisor := toFloat64(b)
+	if divisor == 0 {
+		return nil, divideByZero
+	}
+
+	return toFloat64(a) / divisor, nil
 }
 
 func toFloat64(v any) float64 {

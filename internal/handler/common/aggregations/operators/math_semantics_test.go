@@ -103,3 +103,56 @@ func TestMathOperatorsMatchMongoDB(t *testing.T) {
 		require.Equal(t, tc.code, cmdErr.Code(), "%s: %v", name, err)
 	}
 }
+
+// Before the fix $divide and $mod by zero, and with non-numeric operands,
+// failed as InternalError (or returned a double where MongoDB keeps a long);
+// expected values from mongod 8.0.28.
+func TestDivideAndModMatchMongoDB(t *testing.T) {
+	arr := func(vs ...any) *types.Array { return must.NotFail(types.NewArray(vs...)) }
+
+	for name, tc := range map[string]struct {
+		op   string
+		arg  any
+		want any
+	}{
+		"divide ints":            {"$divide", arr(int32(6), int32(2)), float64(3)},
+		"divide decimal inexact": {"$divide", arr(decimal(t, "1"), decimal(t, "3")), decimal(t, "0.3333333333333333333333333333333333")},
+		"divide decimal exact":   {"$divide", arr(decimal(t, "6"), decimal(t, "2")), decimal(t, "3")},
+		"divide double decimal":  {"$divide", arr(7.5, decimal(t, "2")), decimal(t, "3.75000000000000")},
+		"divide NaN":             {"$divide", arr(math.NaN(), int32(2)), math.NaN()},
+		"mod ints":               {"$mod", arr(int32(-7), int32(3)), int32(-1)},
+		"mod int long":           {"$mod", arr(int32(7), int64(3)), int64(1)},
+		"mod min long":           {"$mod", arr(int64(math.MinInt64), int64(-1)), int64(0)},
+		"mod double":             {"$mod", arr(-7.5, int32(2)), -1.5},
+		"mod decimal":            {"$mod", arr(decimal(t, "7.5"), int32(2)), decimal(t, "1.5")},
+	} {
+		got, err := evalOperator(t, tc.op, tc.arg)
+		require.NoError(t, err, name)
+		if f, ok := tc.want.(float64); ok && math.IsNaN(f) {
+			require.True(t, math.IsNaN(got.(float64)), name)
+			continue
+		}
+		require.Equal(t, tc.want, got, name)
+	}
+
+	for name, tc := range map[string]struct {
+		op   string
+		arg  any
+		code handlererrors.ErrorCode
+	}{
+		"divide by zero":          {"$divide", arr(int32(7), int32(0)), handlererrors.ErrBadValue},
+		"divide by negative zero": {"$divide", arr(int32(7), math.Copysign(0, -1)), handlererrors.ErrBadValue},
+		"divide by decimal zero":  {"$divide", arr(int32(7), decimal(t, "0")), handlererrors.ErrBadValue},
+		"divide string":           {"$divide", arr(int32(7), "x"), handlererrors.ErrTypeMismatch},
+		"divide date":             {"$divide", arr(time.UnixMilli(1000), int32(2)), handlererrors.ErrTypeMismatch},
+		"mod by zero":             {"$mod", arr(int32(7), int32(0)), handlererrors.ErrModByZero},
+		"mod by double zero":      {"$mod", arr(7.5, 0.0), handlererrors.ErrModByZero},
+		"mod by decimal zero":     {"$mod", arr(int32(7), decimal(t, "0")), handlererrors.ErrModByZeroDecimal},
+		"mod string":              {"$mod", arr(int32(7), "x"), handlererrors.ErrModNonNumeric},
+	} {
+		_, err := evalOperator(t, tc.op, tc.arg)
+		var cmdErr *handlererrors.CommandError
+		require.True(t, errors.As(err, &cmdErr), "%s: %v", name, err)
+		require.Equal(t, tc.code, cmdErr.Code(), "%s: %v", name, err)
+	}
+}
