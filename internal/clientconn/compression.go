@@ -22,6 +22,8 @@ import (
 
 	"github.com/FerretDB/wire"
 	"github.com/golang/snappy"
+
+	"github.com/dolthub/dumbodb/internal/clientconn/netstats"
 )
 
 // Compressor is an OP_COMPRESSED compressor id. CompressorNone marks a message
@@ -80,7 +82,11 @@ func decompressMessage(compressed []byte) ([]byte, Compressor, error) {
 // compressed request.
 func writeMessage(w *bufio.Writer, header *wire.MsgHeader, msg wire.MsgBody, compressor Compressor) error {
 	if compressor == CompressorNone {
-		return wire.WriteMessage(w, header, msg)
+		if err := wire.WriteMessage(w, header, msg); err != nil {
+			return err
+		}
+		netstats.RecordReply(int64(header.MessageLength), int64(header.MessageLength))
+		return nil
 	}
 	if compressor != CompressorSnappy {
 		return fmt.Errorf("unsupported compressor %d", compressor)
@@ -111,5 +117,7 @@ func writeMessage(w *bufio.Writer, header *wire.MsgHeader, msg wire.MsgBody, com
 			return err
 		}
 	}
+	netstats.RecordReply(int64(wire.MsgHeaderLen+len(body)), int64(compressedHeader.MessageLength))
+	netstats.RecordSnappyCompression(int64(len(body)), int64(len(payload)))
 	return nil
 }

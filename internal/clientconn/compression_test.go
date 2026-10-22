@@ -24,6 +24,8 @@ import (
 	"github.com/golang/snappy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/dolthub/dumbodb/internal/clientconn/netstats"
 )
 
 func encodeMessage(t *testing.T, msg *wire.OpMsg, requestID int32, compressor Compressor) []byte {
@@ -118,4 +120,33 @@ func TestCompressedMessageRejections(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.want)
 		})
 	}
+}
+
+// Definitions follow mongod: logical sizes are whole uncompressed messages,
+// physical sizes are what crossed the socket, and compressor sizes exclude the
+// header and the OP_COMPRESSED prefix.
+func TestMessagesRecordNetworkCounters(t *testing.T) {
+	msg := wire.MustOpMsg("insert", "c", "blob", string(make([]byte, 50000)), "$db", "x")
+	body, err := msg.MarshalBinary()
+	require.NoError(t, err)
+	logical := int64(wire.MsgHeaderLen + len(body))
+
+	before := netstats.Snapshot()
+	compressed := encodeMessage(t, msg, 1, CompressorSnappy)
+	plain := encodeMessage(t, msg, 2, CompressorNone)
+	readCommand(t, compressed)
+	readCommand(t, plain)
+	after := netstats.Snapshot()
+
+	physical := int64(len(compressed))
+	payload := physical - wire.MsgHeaderLen - compressedPrefixLen
+	assert.Equal(t, int64(2), after.NumRequests-before.NumRequests)
+	assert.Equal(t, 2*logical, after.BytesIn-before.BytesIn)
+	assert.Equal(t, physical+logical, after.PhysicalBytesIn-before.PhysicalBytesIn)
+	assert.Equal(t, 2*logical, after.BytesOut-before.BytesOut)
+	assert.Equal(t, physical+logical, after.PhysicalBytesOut-before.PhysicalBytesOut)
+	assert.Equal(t, payload, after.SnappyDecompressorBytesIn-before.SnappyDecompressorBytesIn)
+	assert.Equal(t, int64(len(body)), after.SnappyDecompressorBytesOut-before.SnappyDecompressorBytesOut)
+	assert.Equal(t, int64(len(body)), after.SnappyCompressorBytesIn-before.SnappyCompressorBytesIn)
+	assert.Equal(t, payload, after.SnappyCompressorBytesOut-before.SnappyCompressorBytesOut)
 }

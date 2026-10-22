@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/FerretDB/wire"
+
+	"github.com/dolthub/dumbodb/internal/clientconn/netstats"
 )
 
 // handshakeTimeout bounds TLS negotiation and, for optional TLS, the wait for
@@ -42,6 +44,9 @@ func readMessage(r *bufio.Reader) (*wire.MsgHeader, wire.MsgBody, Compressor, er
 	header, err := r.Peek(wire.MsgHeaderLen)
 	if err != nil {
 		h, body, err := wire.ReadMessage(r)
+		if err == nil {
+			netstats.RecordRequest(int64(h.MessageLength), int64(h.MessageLength))
+		}
 		return h, body, CompressorNone, err
 	}
 
@@ -49,6 +54,9 @@ func readMessage(r *bufio.Reader) (*wire.MsgHeader, wire.MsgBody, Compressor, er
 	compressed := wire.OpCode(binary.LittleEndian.Uint32(header[12:16])) == wire.OpCodeCompressed
 	if length > wire.MaxMsgLen || (length <= largeMessageThreshold && !compressed) {
 		h, body, err := wire.ReadMessage(r)
+		if err == nil {
+			netstats.RecordRequest(length, length)
+		}
 		return h, body, CompressorNone, err
 	}
 
@@ -67,5 +75,12 @@ func readMessage(r *bufio.Reader) (*wire.MsgHeader, wire.MsgBody, Compressor, er
 		}
 	}
 	h, body, err := wire.ReadMessage(bufio.NewReader(bytes.NewReader(message)))
-	return h, body, compressor, err
+	if err != nil {
+		return h, body, compressor, err
+	}
+	netstats.RecordRequest(int64(len(message)), length)
+	if compressor == CompressorSnappy {
+		netstats.RecordSnappyDecompression(length-wire.MsgHeaderLen-compressedPrefixLen, int64(len(message)-wire.MsgHeaderLen))
+	}
+	return h, body, compressor, nil
 }

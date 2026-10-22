@@ -23,6 +23,7 @@ import (
 	"github.com/FerretDB/wire"
 
 	"github.com/dolthub/dumbodb/internal/backends"
+	"github.com/dolthub/dumbodb/internal/clientconn/netstats"
 	"github.com/dolthub/dumbodb/internal/replication/control"
 	"github.com/dolthub/dumbodb/internal/replication/topology"
 	"github.com/dolthub/dumbodb/internal/types"
@@ -79,6 +80,7 @@ func (h *Handler) MsgServerStatus(connCtx context.Context, msg *wire.OpMsg) (*wi
 			"internalCollections", int32(0),
 			"internalViews", int32(0),
 		)),
+		"network", networkServerStatus(netstats.Snapshot()),
 		"ok", float64(1),
 	))
 	if h.ReplicationTopology != nil {
@@ -92,7 +94,7 @@ func (h *Handler) MsgServerStatus(connCtx context.Context, msg *wire.OpMsg) (*wi
 	// Honor section include/exclude filters: {serverStatus: 1, <section>: 0}
 	// omits that section, matching MongoDB. Only the sub-document sections are
 	// excludable; the scalar top-level fields are always present.
-	for _, section := range []string{"metrics", "catalogStats", "repl", "opcountersRepl"} {
+	for _, section := range []string{"metrics", "catalogStats", "network", "repl", "opcountersRepl"} {
 		if serverStatusSectionExcluded(document, section) {
 			res.Remove(section)
 		}
@@ -101,6 +103,27 @@ func (h *Handler) MsgServerStatus(connCtx context.Context, msg *wire.OpMsg) (*wi
 	return documentOpMsg(
 		res,
 	)
+}
+
+// networkServerStatus reports client wire traffic with mongod's field names and
+// order, omitting the fields DumboDB has nothing to report for.
+func networkServerStatus(stats netstats.Stats) *types.Document {
+	codec := func(bytesIn, bytesOut int64) *types.Document {
+		return must.NotFail(types.NewDocument("bytesIn", bytesIn, "bytesOut", bytesOut))
+	}
+	return must.NotFail(types.NewDocument(
+		"bytesIn", stats.BytesIn,
+		"bytesOut", stats.BytesOut,
+		"physicalBytesIn", stats.PhysicalBytesIn,
+		"physicalBytesOut", stats.PhysicalBytesOut,
+		"numRequests", stats.NumRequests,
+		"compression", must.NotFail(types.NewDocument(
+			"snappy", must.NotFail(types.NewDocument(
+				"compressor", codec(stats.SnappyCompressorBytesIn, stats.SnappyCompressorBytesOut),
+				"decompressor", codec(stats.SnappyDecompressorBytesIn, stats.SnappyDecompressorBytesOut),
+			)),
+		)),
+	))
 }
 
 func (h *Handler) replicationServerStatusRepl(state topology.Snapshot) *types.Document {
