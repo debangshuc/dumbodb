@@ -1196,6 +1196,9 @@ func makeOutWriter(b backends.Backend, currentDB string) stages.OutWriter { //no
 			if nextErr != nil {
 				return nextErr
 			}
+			if !doc.Has("_id") {
+				doc.Set("_id", types.NewObjectID())
+			}
 			batch = append(batch, doc)
 			batchBytes += doc.BSONSize()
 			if len(batch) >= outBatchSize || batchBytes >= outBatchBytes {
@@ -1241,6 +1244,11 @@ func makeMergeWriter(b backends.Backend, currentDB string) stages.MergeFunc { //
 				backends.ErrorCodeIs(err, backends.ErrorCodeDatabaseDoesNotExist) {
 				// Collection doesn't exist yet; all docs are "not matched".
 				if params.WhenNotMatched == "insert" {
+					for _, doc := range params.Docs {
+						if !doc.Has("_id") {
+							doc.Set("_id", types.NewObjectID())
+						}
+					}
 					_, insertErr := coll.InsertAll(ctx, &backends.InsertAllParams{Docs: params.Docs})
 					return insertErr
 				}
@@ -1321,6 +1329,9 @@ func makeMergeWriter(b backends.Backend, currentDB string) stages.MergeFunc { //
 			} else {
 				switch params.WhenNotMatched {
 				case "insert":
+					if !incoming.Has("_id") {
+						incoming.Set("_id", types.NewObjectID())
+					}
 					toInsert = append(toInsert, incoming)
 
 				case "discard":

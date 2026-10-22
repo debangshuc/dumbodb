@@ -94,3 +94,36 @@ func TestOutAndMergeStreamCorrectly(t *testing.T) {
 		require.EqualValues(t, n, count, "every target document must be merged, whichever batch it was in")
 	})
 }
+
+// As in MongoDB, $out and $merge give documents without an _id a generated
+// ObjectId (found by parity AggOut_FailureLeavesTargetUnchanged).
+func TestOutAndMergeGenerateMissingIDs(t *testing.T) {
+	env := startDumboDB(t)
+	ctx := context.Background()
+	db := env.Client.Database("ids")
+	_, err := db.Collection("src").InsertMany(ctx, []any{
+		bson.D{{Key: "_id", Value: 1}, {Key: "sub", Value: bson.D{{Key: "n", Value: 1}}}},
+		bson.D{{Key: "_id", Value: 2}, {Key: "sub", Value: bson.D{{Key: "n", Value: 2}}}},
+	})
+	require.NoError(t, err)
+	noID := bson.D{{Key: "$replaceRoot", Value: bson.D{{Key: "newRoot", Value: "$sub"}}}}
+
+	for name, last := range map[string]bson.D{
+		"$out":   {{Key: "$out", Value: "out_target"}},
+		"$merge": {{Key: "$merge", Value: "merge_target"}},
+	} {
+		cursor, err := db.Collection("src").Aggregate(ctx, bson.A{noID, last})
+		require.NoError(t, err, name)
+		require.NoError(t, cursor.All(ctx, &[]bson.M{}), name)
+	}
+	for _, target := range []string{"out_target", "merge_target"} {
+		var docs []bson.M
+		cursor, err := db.Collection(target).Find(ctx, bson.D{})
+		require.NoError(t, err)
+		require.NoError(t, cursor.All(ctx, &docs))
+		require.Len(t, docs, 2, target)
+		for _, doc := range docs {
+			require.IsType(t, bson.ObjectID{}, doc["_id"], target)
+		}
+	}
+}
