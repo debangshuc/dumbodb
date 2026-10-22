@@ -17,10 +17,12 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/FerretDB/wire"
@@ -322,4 +324,36 @@ func TestAuthGate_DisabledAllowsUnauthenticated(t *testing.T) {
 
 	_, err := h.commands["listDatabases"].Handler(ctx, gateCmd(t, "listDatabases"))
 	require.False(t, isForcedLoginError(err), "gate must be inactive when EnableNewAuth is false, got %v", err)
+}
+
+// Before the fix the user count and the latch were checked without a lock,
+// so concurrent loopback createUser calls could all see zero users and all
+// bootstrap a user, skipping authorization.
+func TestAuthGate_LocalhostExceptionAdmitsOneConcurrentBootstrap(t *testing.T) {
+	h := authGateHandler(t, true)
+
+	const callers = 20
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make([]error, callers)
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, errs[i] = h.commands["createUser"].Handler(peerCtx("127.0.0.1:40000"), createUserMsg(t, fmt.Sprintf("racer%d", i), "pw"))
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	created := 0
+	for _, err := range errs {
+		if err == nil {
+			created++
+		} else {
+			require.True(t, isForcedLoginError(err), "losing callers must need authentication, got %v", err)
+		}
+	}
+	require.Equal(t, 1, created, "exactly one caller may use the localhost exception")
 }

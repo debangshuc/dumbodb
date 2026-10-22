@@ -253,6 +253,12 @@ func (h *Handler) initCommands() {
 				if authenticated {
 					if err := checkAuthentication(ctx, wireCommandName(msg), h.L); err != nil {
 						if h.localhostExceptionApplies(ctx, wireCommandName(msg)) {
+							h.bootstrapMu.Lock()
+							defer h.bootstrapMu.Unlock()
+							// Another caller may have bootstrapped while this one waited.
+							if !h.localhostExceptionApplies(ctx, wireCommandName(msg)) {
+								return nil, err
+							}
 							res, createErr := authed(ctx, msg)
 							if createErr == nil {
 								h.bootstrapLatch.Store(true)
