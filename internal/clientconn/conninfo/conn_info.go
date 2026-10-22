@@ -70,6 +70,8 @@ type ConnInfo struct {
 	metadataRecv bool // protected by rw
 	usesTLS      bool // protected by rw
 
+	compressors []string // protected by rw; negotiated in hello
+
 	// If true, backend implementations should not perform authentication
 	// by adding username and password to the connection string.
 	// It is set to true for background connections (such us capped collections cleanup)
@@ -135,6 +137,21 @@ func (connInfo *ConnInfo) SetUsesTLS(usesTLS bool) {
 	defer connInfo.rw.Unlock()
 
 	connInfo.usesTLS = usesTLS
+}
+
+// Compressors returns the compressors the client last negotiated in hello.
+func (connInfo *ConnInfo) Compressors() []string {
+	connInfo.rw.RLock()
+	defer connInfo.rw.RUnlock()
+
+	return connInfo.compressors
+}
+
+func (connInfo *ConnInfo) SetCompressors(compressors []string) {
+	connInfo.rw.Lock()
+	defer connInfo.rw.Unlock()
+
+	connInfo.compressors = compressors
 }
 
 // Auth returns stored username, password (for PLAIN mechanism), SCRAM server conversation (if any) and user's authentication db.
