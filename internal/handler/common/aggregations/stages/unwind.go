@@ -208,94 +208,119 @@ func parseUnwindPath(field string) (*aggregations.Expression, error) {
 }
 
 func (u *unwind) Process(_ context.Context, iter types.DocumentsIterator, closer *iterator.MultiCloser) (types.DocumentsIterator, error) { //nolint:lll // for readability
-	docs, err := iterator.ConsumeValues(iter)
-	if err != nil {
-		return nil, lazyerrors.Error(err)
-	}
-
-	var out []*types.Document
-
 	if u.field == nil {
-		result := iterator.Values(iterator.ForSlice(out))
+		iter.Close()
+		result := iterator.Values(iterator.ForSlice([]*types.Document(nil)))
 		closer.Add(result)
 
 		return result, nil
 	}
 
-	fieldPath := u.field.GetExpressionPath()
+	res := &unwindIterator{u: u, iter: iter, fieldPath: u.field.GetExpressionPath()}
+	closer.Add(res)
 
-	for _, doc := range docs {
-		d, evalErr := u.field.Evaluate(doc)
+	return res, nil
+}
 
-		if evalErr != nil {
-			// Field does not exist in the document.
-			if u.preserveNullAndEmptyArrays {
-				out = append(out, doc.DeepCopy())
+// unwindIterator emits one document per array element as it is read, so
+// neither the stage's input nor a large array's expansion is held at once.
+type unwindIterator struct {
+	u         *unwind
+	iter      types.DocumentsIterator
+	fieldPath types.Path
+
+	// doc and elements are the input document being unwound and its array.
+	doc      *types.Document
+	elements iterator.Interface[int, any]
+}
+
+func (it *unwindIterator) Next() (struct{}, *types.Document, error) {
+	var unused struct{}
+
+	for {
+		if it.elements != nil {
+			idx, v, err := it.elements.Next()
+			if err == nil {
+				newDoc := it.doc.DeepCopy()
+				if setErr := newDoc.SetByPath(it.fieldPath, v); setErr != nil {
+					return unused, nil, lazyerrors.Error(setErr)
+				}
+				if it.u.includeArrayIndex != "" {
+					newDoc.Set(it.u.includeArrayIndex, int64(idx))
+				}
+
+				return unused, newDoc, nil
 			}
 
-			continue
+			it.elements.Close()
+			it.elements, it.doc = nil, nil
+
+			if !errors.Is(err, iterator.ErrIteratorDone) {
+				return unused, nil, lazyerrors.Error(err)
+			}
 		}
 
-		switch d := d.(type) {
-		case types.NullType:
-			// Field is null.
-			if u.preserveNullAndEmptyArrays {
-				out = append(out, doc.DeepCopy())
-			}
+		_, doc, err := it.iter.Next()
+		if err != nil {
+			return unused, nil, err
+		}
 
-		case *types.Array:
-			if d.Len() == 0 {
-				// Empty array.
-				if u.preserveNullAndEmptyArrays {
-					// Emit the document with the field removed.
-					newDoc := doc.DeepCopy()
-					newDoc.RemoveByPath(fieldPath)
-					out = append(out, newDoc)
-				}
-
-				continue
-			}
-
-			// Non-empty array: emit one doc per element.
-			arrIter := d.Iterator()
-
-			for {
-				idx, v, iterErr := arrIter.Next()
-				if iterErr != nil {
-					arrIter.Close()
-
-					if errors.Is(iterErr, iterator.ErrIteratorDone) {
-						break
-					}
-
-					return nil, lazyerrors.Error(iterErr)
-				}
-
-				newDoc := doc.DeepCopy()
-
-				if setErr := newDoc.SetByPath(fieldPath, v); setErr != nil {
-					arrIter.Close()
-
-					return nil, lazyerrors.Error(setErr)
-				}
-
-				if u.includeArrayIndex != "" {
-					newDoc.Set(u.includeArrayIndex, int64(idx))
-				}
-
-				out = append(out, newDoc)
-			}
-
-		default:
-			// Scalar value: pass through unchanged.
-			out = append(out, doc.DeepCopy())
+		if out := it.start(doc); out != nil {
+			return unused, out, nil
 		}
 	}
+}
 
-	result := iterator.Values(iterator.ForSlice(out))
-	closer.Add(result)
+// start begins unwinding doc. It returns the document to emit when doc
+// produces at most one output, or nil after queuing an array's elements or
+// dropping doc.
+func (it *unwindIterator) start(doc *types.Document) *types.Document {
+	d, evalErr := it.u.field.Evaluate(doc)
+	if evalErr != nil {
+		// Field does not exist in the document.
+		if it.u.preserveNullAndEmptyArrays {
+			return doc.DeepCopy()
+		}
 
-	return result, nil
+		return nil
+	}
+
+	switch d := d.(type) {
+	case types.NullType:
+		if it.u.preserveNullAndEmptyArrays {
+			return doc.DeepCopy()
+		}
+
+		return nil
+
+	case *types.Array:
+		if d.Len() == 0 {
+			if it.u.preserveNullAndEmptyArrays {
+				// Emit the document with the field removed.
+				newDoc := doc.DeepCopy()
+				newDoc.RemoveByPath(it.fieldPath)
+
+				return newDoc
+			}
+
+			return nil
+		}
+
+		it.doc, it.elements = doc, d.Iterator()
+
+		return nil
+
+	default:
+		// Scalar value: pass through unchanged.
+		return doc.DeepCopy()
+	}
+}
+
+func (it *unwindIterator) Close() {
+	if it.elements != nil {
+		it.elements.Close()
+	}
+	it.iter.Close()
 }
 
 var (

@@ -48,28 +48,9 @@ func newRedact(stage *types.Document) (aggregations.Stage, error) {
 }
 
 func (r *redactStage) Process(_ context.Context, iter types.DocumentsIterator, closer *iterator.MultiCloser) (types.DocumentsIterator, error) { //nolint:lll // for readability
-	docs, err := iterator.ConsumeValues(iter)
-	if err != nil {
-		return nil, lazyerrors.Error(err)
-	}
-
-	var out []*types.Document
-
-	for _, doc := range docs {
-		result, redactErr := redactDocument(r.expr, doc)
-		if redactErr != nil {
-			return nil, redactErr
-		}
-
-		if result != nil {
-			out = append(out, result)
-		}
-	}
-
-	res := iterator.Values(iterator.ForSlice(out))
-	closer.Add(res)
-
-	return res, nil
+	return newMapIterator(iter, closer, func(doc *types.Document) (*types.Document, error) {
+		return redactDocument(r.expr, doc)
+	}), nil
 }
 
 // redactDocument applies the redact expression to a document.

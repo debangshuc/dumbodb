@@ -78,3 +78,46 @@ func TestBlockingStagesHaveMemoryLimit(t *testing.T) {
 		"$group without retaining accumulators streams and stays within the limit")
 	require.NoError(t, runStage(t, doc("$match", doc("k", int32(1)))), "streaming stages are not limited")
 }
+
+// bigLocatedInput is bigInput with a point on every document.
+func bigLocatedInput() []*types.Document {
+	docs := bigInput()
+	for i, doc := range docs {
+		doc.Set("loc", must.NotFail(types.NewArray(float64(i%10), float64(0))))
+	}
+	return docs
+}
+
+// $geoNear sorts by distance. MongoDB streams it from a geo index; DumboDB
+// sorts in memory, so it is limited like $sort, counting only the documents
+// it keeps.
+func TestGeoNearHasMemoryLimit(t *testing.T) {
+	doc := func(pairs ...any) *types.Document { return must.NotFail(types.NewDocument(pairs...)) }
+	near := func(extra ...any) *types.Document {
+		spec := doc(append([]any{
+			"near", must.NotFail(types.NewArray(float64(0), float64(0))),
+			"distanceField", "dist",
+			"key", "loc",
+		}, extra...)...)
+		return doc("$geoNear", spec)
+	}
+	run := func(spec *types.Document) error {
+		stage, err := stages.NewStage(spec)
+		require.NoError(t, err)
+		closer := iterator.NewMultiCloser()
+		defer closer.Close()
+		out, err := stage.Process(context.Background(), iterator.Values(iterator.ForSlice(bigLocatedInput())), closer)
+		if err != nil {
+			return err
+		}
+		_, err = iterator.ConsumeValues(out)
+		return err
+	}
+
+	err := run(near())
+	var cmdErr *handlererrors.CommandError
+	require.True(t, errors.As(err, &cmdErr), "want CommandError, got %v", err)
+	require.Equal(t, handlererrors.ErrQueryExceededMemoryLimitNoDiskUseAllowed, cmdErr.Code())
+
+	require.NoError(t, run(near("query", doc("k", int32(1)))), "documents the query rejects are not held")
+}

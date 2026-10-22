@@ -26,11 +26,11 @@ import (
 )
 
 // OutWriter is a callback that replaces all documents in the named collection
-// with the provided documents.  It should drop the collection if it exists,
-// recreate it, and insert the documents atomically.
+// with docs, reading them as it writes so the stage's output is never held at
+// once. If it fails, the existing collection must be left unchanged.
 //
 // dbName is the target database; collName is the target collection.
-type OutWriter func(ctx context.Context, dbName, collName string, docs []*types.Document) error
+type OutWriter func(ctx context.Context, dbName, collName string, docs types.DocumentsIterator) error
 
 // out represents $out stage.
 //
@@ -124,16 +124,13 @@ func NewOutStage(stage *types.Document, sourceDB string, writer OutWriter) (aggr
 
 // Process implements Stage interface.
 //
-// It consumes all documents from iter, writes them to the target collection via
-// the OutWriter callback, and returns an empty iterator (the aggregate command
-// returns no documents to the caller when $out is used).
+// It hands iter to the OutWriter callback, which writes it to the target
+// collection, and returns an empty iterator (the aggregate command returns no
+// documents to the caller when $out is used).
 func (s *out) Process(ctx context.Context, iter types.DocumentsIterator, closer *iterator.MultiCloser) (types.DocumentsIterator, error) { //nolint:lll // for readability
-	docs, err := iterator.ConsumeValues(iter)
-	if err != nil {
-		return nil, lazyerrors.Error(err)
-	}
+	defer iter.Close()
 
-	if err = s.writer(ctx, s.targetDB, s.targetColl, docs); err != nil {
+	if err := s.writer(ctx, s.targetDB, s.targetColl, iter); err != nil {
 		return nil, lazyerrors.Error(err)
 	}
 
