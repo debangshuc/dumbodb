@@ -80,6 +80,7 @@ func readMessage(r *bufio.Reader) (header *wire.MsgHeader, body wire.MsgBody, co
 	}
 
 	message := buf.Bytes()
+	compressor = CompressorNone
 	if compressed {
 		if message, compressor, err = decompressMessage(message); err != nil {
 			return nil, nil, CompressorNone, err
