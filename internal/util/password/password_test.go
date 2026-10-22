@@ -21,7 +21,7 @@ import (
 )
 
 // A Hebrew letter after Latin ones fails the SASLprep bidi rule.
-const bidiPassword = "plaintextsecretא"
+const bidiPassword = "plaintextsecret\u05d0"
 
 func TestSASLprepErrorOmitsPassword(t *testing.T) {
 	_, err := SCRAMSHA256Hash(WrapPassword(bidiPassword))

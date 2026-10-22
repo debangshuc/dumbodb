@@ -34,7 +34,7 @@ import (
 func TestSASLprepFailureDoesNotEchoPassword(t *testing.T) {
 	h := authGateHandler(t, false)
 	ctx := conninfo.Ctx(context.Background(), conninfo.New())
-	const bidiPassword = "plaintextsecretא"
+	const bidiPassword = "plaintextsecret\u05d0"
 
 	createUser := func(user, pwd string) *wire.OpMsg {
 		return must.NotFail(documentOpMsg(must.NotFail(types.NewDocument(
