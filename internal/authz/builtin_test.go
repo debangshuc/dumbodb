@@ -93,3 +93,16 @@ func TestBuiltinRolesDoNotExistOnExternal(t *testing.T) {
 	require.Empty(t, BuiltinRoleNames("$external"))
 	require.False(t, IsBuiltinRoleOnDB("readWrite", "$external"))
 }
+
+// As in MongoDB, clusterManager (and roles built on it) may read the replica
+// set configuration and status; hostManager may not.
+func TestBuiltinRoleReplicaSetInspection(t *testing.T) {
+	for _, role := range []string{"clusterMonitor", "clusterManager", "clusterAdmin", "root"} {
+		privs := mustRole(t, role, "admin")
+		require.True(t, privs.Authorized(ActionReplSetGetConfig, ClusterResource), role)
+		require.True(t, privs.Authorized(ActionReplSetGetStatus, ClusterResource), role)
+	}
+	hostManager := mustRole(t, "hostManager", "admin")
+	require.False(t, hostManager.Authorized(ActionReplSetGetConfig, ClusterResource))
+	require.False(t, hostManager.Authorized(ActionReplSetGetStatus, ClusterResource))
+}

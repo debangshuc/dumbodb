@@ -41,7 +41,7 @@ var (
 		ActionListDatabases, ActionTop, ActionGetLog, ActionListSessions,
 		ActionInprog, ActionGetCmdLineOpts, ActionReplSetGetStatus, ActionReplSetGetConfig,
 	}
-	clusterManagerActions   = []Action{ActionCompact, ActionSetParameter, ActionRotateCertificates, ActionReplSetGetConfig}
+	clusterManagerActions   = []Action{ActionCompact, ActionSetParameter, ActionRotateCertificates}
 	clusterMonitorDBActions = []Action{
 		ActionDBStats, ActionCollStats, ActionListCollections, ActionListIndexes,
 	}
@@ -125,7 +125,9 @@ func BuiltinRole(role, db string) (PrivilegeSet, bool) {
 			{allDB, []Action{ActionDropDatabase}},
 		}, true
 	case "clusterManager":
-		return PrivilegeSet{}, true
+		return PrivilegeSet{
+			{ClusterResource, []Action{ActionReplSetGetConfig, ActionReplSetGetStatus}},
+		}, true
 	case "hostManager":
 		return PrivilegeSet{
 			{ClusterResource, clusterManagerActions},
