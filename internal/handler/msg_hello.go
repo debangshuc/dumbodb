@@ -18,13 +18,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/FerretDB/wire"
 
+	"github.com/dolthub/dumbodb/internal/clientconn/conninfo"
 	"github.com/dolthub/dumbodb/internal/handler/common"
 	"github.com/dolthub/dumbodb/internal/handler/handlererrors"
+	"github.com/dolthub/dumbodb/internal/handler/handlerparams"
 	"github.com/dolthub/dumbodb/internal/replication/membership"
 	"github.com/dolthub/dumbodb/internal/replication/topology"
 	"github.com/dolthub/dumbodb/internal/types"
@@ -74,7 +77,14 @@ func (h *Handler) hello(ctx context.Context, doc *types.Document, tcpHost, name 
 		}
 	}
 
+	compression, err := negotiateCompression(ctx, doc)
+	if err != nil {
+		return nil, err
+	}
 	res := must.NotFail(types.NewDocument())
+	if compression != nil {
+		res.Set("compression", compression)
+	}
 	isSecondary := name != ""
 	if h.ReplicationTopology != nil {
 		isSecondary = h.ReplicationTopology.Snapshot().State == topology.StateSecondary
@@ -170,6 +180,66 @@ func (h *Handler) hello(ctx context.Context, doc *types.Document, tcpHost, name 
 	res.Set("ok", float64(1))
 
 	return res, nil
+}
+
+// supportedCompressors lists the OP_COMPRESSED compressors clientconn decodes.
+var supportedCompressors = []string{"snappy"}
+
+// negotiateCompression returns the compressors to report in hello, or nil when
+// there are none; mongod then omits the field. As in mongod, a compression list
+// replaces the connection's negotiated compressors with the requested ones the
+// server supports, in the client's order, and a hello without one reports the
+// compressors negotiated earlier on the connection.
+func negotiateCompression(ctx context.Context, doc *types.Document) (*types.Array, error) {
+	connInfo := conninfo.GetIfPresent(ctx)
+	requested, err := doc.Get("compression")
+	if err != nil {
+		if connInfo == nil {
+			return nil, nil
+		}
+		return compressorArray(connInfo.Compressors()), nil
+	}
+
+	list, ok := requested.(*types.Array)
+	if !ok {
+		return nil, handlererrors.NewCommandErrorMsgWithArgument(
+			handlererrors.ErrTypeMismatch,
+			fmt.Sprintf("BSON field '%s.compression' is the wrong type '%s', expected type 'array'",
+				doc.Command(), handlerparams.AliasFromType(requested)),
+			doc.Command(),
+		)
+	}
+	var accepted []string
+	for i := 0; i < list.Len(); i++ {
+		element := must.NotFail(list.Get(i))
+		name, ok := element.(string)
+		if !ok {
+			return nil, handlererrors.NewCommandErrorMsgWithArgument(
+				handlererrors.ErrTypeMismatch,
+				fmt.Sprintf("BSON field '%s.compression.%d' is the wrong type '%s', expected type 'string'",
+					doc.Command(), i, handlerparams.AliasFromType(element)),
+				doc.Command(),
+			)
+		}
+		if slices.Contains(supportedCompressors, name) {
+			accepted = append(accepted, name)
+		}
+	}
+	if connInfo != nil {
+		connInfo.SetCompressors(accepted)
+	}
+	return compressorArray(accepted), nil
+}
+
+func compressorArray(names []string) *types.Array {
+	if len(names) == 0 {
+		return nil
+	}
+	array := types.MakeArray(len(names))
+	for _, name := range names {
+		array.Append(name)
+	}
+	return array
 }
 
 func appendReplicaSetHello(response *types.Document, state topology.Snapshot) {

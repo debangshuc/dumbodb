@@ -38,7 +38,7 @@ func TestReadMessageAllocatesForReceivedBytesOnly(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	_, _, err := readMessage(bufio.NewReader(bytes.NewReader(input)))
+	_, _, _, err := readMessage(bufio.NewReader(bytes.NewReader(input)))
 	runtime.ReadMemStats(&after)
 
 	require.Error(t, err, "a truncated message is an error")
@@ -55,7 +55,7 @@ func TestReadMessageRoundTrips(t *testing.T) {
 		hb, err := header.MarshalBinary()
 		require.NoError(t, err)
 
-		gotHeader, gotBody, err := readMessage(bufio.NewReader(bytes.NewReader(append(hb, raw...))))
+		gotHeader, gotBody, _, err := readMessage(bufio.NewReader(bytes.NewReader(append(hb, raw...))))
 		require.NoError(t, err)
 		require.Equal(t, int32(7), gotHeader.RequestID)
 		doc, err := gotBody.(*wire.OpMsg).RawDocument()

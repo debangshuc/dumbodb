@@ -270,8 +270,9 @@ func (c *conn) run(ctx context.Context) (err error) {
 		var reqBody wire.MsgBody
 		var resHeader *wire.MsgHeader
 		var resBody wire.MsgBody
+		var reqCompressor Compressor
 
-		reqHeader, reqBody, err = readMessage(bufr)
+		reqHeader, reqBody, reqCompressor, err = readMessage(bufr)
 		if err != nil {
 			return
 		}
@@ -383,7 +384,7 @@ func (c *conn) run(ctx context.Context) (err error) {
 			responseTo := reqHeader.RequestID
 			for {
 				resHeader.ResponseTo = responseTo
-				if err = wire.WriteMessage(bufw, resHeader, resBody); err != nil {
+				if err = writeMessage(bufw, resHeader, resBody, reqCompressor); err != nil {
 					return
 				}
 				if err = bufw.Flush(); err != nil {
