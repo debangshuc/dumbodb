@@ -93,6 +93,9 @@ func (h *Handler) MsgRolesInfo(connCtx context.Context, msg *wire.OpMsg) (*wire.
 			if r.Role == "" {
 				continue
 			}
+			if err = common.ValidateDatabaseName(r.DB); err != nil {
+				return nil, err
+			}
 
 			if authz.IsBuiltinRoleOnDB(r.Role, r.DB) {
 				res.Append(builtinRoleInfo(r.Role, r.DB, showPrivileges))

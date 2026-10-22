@@ -23,6 +23,7 @@ import (
 
 	"github.com/dolthub/dumbodb/internal/backends"
 	"github.com/dolthub/dumbodb/internal/bson"
+	"github.com/dolthub/dumbodb/internal/handler/common"
 	"github.com/dolthub/dumbodb/internal/types"
 	"github.com/dolthub/dumbodb/internal/util/iterator"
 	"github.com/dolthub/dumbodb/internal/util/lazyerrors"
@@ -127,6 +128,9 @@ func NormalizeRoles(roles *types.Array, defaultDB string) (*types.Array, error) 
 			dbStr, ok := db.(string)
 			if !ok {
 				return nil, lazyerrors.Errorf("role db must be a string, got %T", db)
+			}
+			if err := common.ValidateDatabaseName(dbStr); err != nil {
+				return nil, err
 			}
 
 			out.Append(must.NotFail(types.NewDocument("role", roleStr, "db", dbStr)))

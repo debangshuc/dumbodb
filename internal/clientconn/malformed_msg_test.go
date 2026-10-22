@@ -132,3 +132,27 @@ func TestRouteRejectsInvalidBody(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, float64(0), decoded.Get("ok"))
 }
+
+// User and role _ids are "<db>.<name>", so a database name containing '.'
+// could alias another database's principal. MongoDB rejects such names for
+// every command before running it.
+func TestRouteRejectsInvalidDatabaseName(t *testing.T) {
+	for db, char := range map[string]string{"a.b": ".", "a b": " ", "a/b": "/", "a$b": "$", `a"b`: `"`} {
+		msg := wire.MustOpMsg("ping", int32(1), "$db", db)
+		raw, err := msg.MarshalBinary()
+		require.NoError(t, err)
+		header, body, _, err := readMessage(bufio.NewReader(bytes.NewReader(rawMessage(wire.OpCodeMsg, raw))))
+		require.NoError(t, err)
+
+		c := &conn{mode: NormalMode, l: slog.New(slog.DiscardHandler), h: &handler.Handler{}}
+		ctx := conninfo.Ctx(context.Background(), conninfo.New())
+		_, resBody, _ := c.route(ctx, header, body)
+
+		res, err := resBody.(*wire.OpMsg).RawDocument()
+		require.NoError(t, err)
+		decoded, err := res.Decode()
+		require.NoError(t, err)
+		require.Equal(t, int32(73), decoded.Get("code"), db)
+		require.Equal(t, "'"+char+"' is an invalid character in a db name: "+db, decoded.Get("errmsg"), db)
+	}
+}

@@ -60,3 +60,40 @@ func TestSASLprepFailureDoesNotEchoPassword(t *testing.T) {
 		require.Contains(t, commandErr.Error(), "U_STRINGPREP_CHECK_BIDI_ERROR", name)
 	}
 }
+
+// A role reference to a database named "a.b" would resolve to the role "b.c"
+// of database "a" through the shared "<db>.<role>" _id; MongoDB rejects it.
+func TestRoleReferencesRejectInvalidDatabaseNames(t *testing.T) {
+	h := authGateHandler(t, false)
+	ctx := conninfo.Ctx(context.Background(), conninfo.New())
+
+	_, err := h.MsgCreateUser(ctx, must.NotFail(documentOpMsg(must.NotFail(types.NewDocument(
+		"createUser", "u", "pwd", "pw",
+		"roles", must.NotFail(types.NewArray(must.NotFail(types.NewDocument("role", "c", "db", "a.b")))),
+		"$db", "x",
+	)))))
+	var commandErr *handlererrors.CommandError
+	require.True(t, errors.As(err, &commandErr), "%v", err)
+	require.Equal(t, handlererrors.ErrInvalidNamespace, commandErr.Code())
+	require.Contains(t, commandErr.Error(), "'.' is an invalid character in a db name: a.b")
+}
+
+// Users and roles live in plain databases; a ref suffix would let "a@b.c" +
+// "d" and "a@b" + "c.d" share the _id "a@b.c.d".
+func TestPrincipalCommandsRequirePlainDatabaseName(t *testing.T) {
+	h := authGateHandler(t, false)
+	ctx := conninfo.Ctx(context.Background(), conninfo.New())
+
+	for _, cmd := range []*wire.OpMsg{
+		must.NotFail(documentOpMsg(must.NotFail(types.NewDocument("createUser", "d", "pwd", "pw", "roles", types.MakeArray(0), "$db", "a@b.c")))),
+		must.NotFail(documentOpMsg(must.NotFail(types.NewDocument("createRole", "d", "privileges", types.MakeArray(0), "roles", types.MakeArray(0), "$db", "a@b.c")))),
+		must.NotFail(documentOpMsg(must.NotFail(types.NewDocument("usersInfo", must.NotFail(types.NewDocument("user", "c", "db", "a.b")), "$db", "x")))),
+		must.NotFail(documentOpMsg(must.NotFail(types.NewDocument("rolesInfo", must.NotFail(types.NewDocument("role", "c", "db", "a.b")), "$db", "x")))),
+	} {
+		name := wireCommandName(cmd)
+		_, err := h.commands[name].Handler(ctx, cmd)
+		var commandErr *handlererrors.CommandError
+		require.True(t, errors.As(err, &commandErr), "%s: %v", name, err)
+		require.Equal(t, handlererrors.ErrInvalidNamespace, commandErr.Code(), "%s: %v", name, err)
+	}
+}

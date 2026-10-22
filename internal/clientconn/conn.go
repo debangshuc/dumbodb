@@ -41,9 +41,11 @@ import (
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/sqle/dsess"
 
+	"github.com/dolthub/dumbodb/internal/backends"
 	"github.com/dolthub/dumbodb/internal/bson"
 	"github.com/dolthub/dumbodb/internal/clientconn/conninfo"
 	"github.com/dolthub/dumbodb/internal/handler"
+	"github.com/dolthub/dumbodb/internal/handler/common"
 	"github.com/dolthub/dumbodb/internal/handler/handlererrors"
 	"github.com/dolthub/dumbodb/internal/handler/proxy"
 	"github.com/dolthub/dumbodb/internal/sqlctx"
@@ -541,6 +543,16 @@ func (c *conn) route(connCtx context.Context, reqHeader *wire.MsgHeader, reqBody
 					handlererrors.ErrFailedToParse,
 					fmt.Sprintf("BSON field '%s' is a duplicate field", dup),
 				)
+			}
+		}
+
+		if err == nil {
+			if db, _ := typedDoc.Get("$db"); db != nil {
+				if dbName, ok := db.(string); ok {
+					// The ref after '@' has its own syntax and validation.
+					baseName, _ := backends.SplitEncodedDBName(dbName)
+					err = common.ValidateDatabaseName(baseName)
+				}
 			}
 		}
 

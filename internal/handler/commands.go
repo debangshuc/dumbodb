@@ -26,6 +26,7 @@ import (
 
 	"github.com/dolthub/dumbodb/internal/backends"
 	"github.com/dolthub/dumbodb/internal/clientconn/conninfo"
+	"github.com/dolthub/dumbodb/internal/handler/common"
 	"github.com/dolthub/dumbodb/internal/handler/handlererrors"
 	"github.com/dolthub/dumbodb/internal/types"
 	"github.com/dolthub/dumbodb/internal/util/lazyerrors"
@@ -282,8 +283,15 @@ func (h *Handler) initCommands() {
 
 		l := h.L
 		next := inner
+		requiresPlainDB := plainDatabaseCommands[canonicalName]
 		cmd.Handler = func(ctx context.Context, msg *wire.OpMsg) (*wire.OpMsg, error) {
 			start := time.Now()
+			if requiresPlainDB {
+				_, db, _ := wireCommandTarget(msg)
+				if err := common.ValidateDatabaseName(db); err != nil {
+					return nil, err
+				}
+			}
 			if err := h.observeLogicalTime(ctx, msg); err != nil {
 				return nil, err
 			}
@@ -299,6 +307,18 @@ func (h *Handler) initCommands() {
 			return res, handlerErr
 		}
 	}
+}
+
+// plainDatabaseCommands store or look up users and roles, whose _ids are
+// "<db>.<name>". Their $db must be a valid database name with no ref suffix,
+// so no two principals share an _id.
+var plainDatabaseCommands = map[string]bool{
+	"authenticate": true, "saslStart": true, "saslContinue": true,
+	"createUser": true, "updateUser": true, "dropUser": true, "dropAllUsersFromDatabase": true,
+	"usersInfo": true, "grantRolesToUser": true, "revokeRolesFromUser": true,
+	"createRole": true, "updateRole": true, "dropRole": true, "dropAllRolesFromDatabase": true,
+	"rolesInfo": true, "grantRolesToRole": true, "revokeRolesFromRole": true,
+	"grantPrivilegesToRole": true, "revokePrivilegesFromRole": true,
 }
 
 // databaseDifferCaseError reports a backend DatabaseDifferCase error as
