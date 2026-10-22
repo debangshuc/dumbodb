@@ -103,6 +103,13 @@ func (h *Handler) MsgDumboDBPull(connCtx context.Context, msg *wire.OpMsg) (*wir
 		return nil, err
 	}
 
+	// As for commit, merge and revert, the server stamps the caller's identity
+	// under access control.
+	author, committer, err := h.commitAuthorCommitter(connCtx, author)
+	if err != nil {
+		return nil, err
+	}
+
 	vb := h.versioningBackend()
 	if vb == nil {
 		return nil, handlererrors.NewCommandErrorMsg(handlererrors.ErrOperationFailed, "dumboPull: versioning is not supported by the current backend")
@@ -119,6 +126,7 @@ func (h *Handler) MsgDumboDBPull(connCtx context.Context, msg *wire.OpMsg) (*wir
 		RebaseSet: rebaseSet,
 		Message:   message,
 		Author:    author,
+		Committer: committer,
 	})
 	if err != nil {
 		var conflicts []backends.ConflictSummary

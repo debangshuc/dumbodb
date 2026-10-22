@@ -868,6 +868,7 @@ type PullParams struct {
 	RebaseSet bool   // whether Rebase was passed explicitly
 	Message   string // optional merge commit message
 	Author    string // optional 'Name <email>' for a merge commit
+	Committer string // optional 'Name <email>' committer of the merge or rebased commits; empty means Author
 }
 
 // PullResult is returned by DumboDBPull.

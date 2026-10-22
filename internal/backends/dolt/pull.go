@@ -108,9 +108,10 @@ func (b *Backend) DumboDBPull(ctx context.Context, params *backends.PullParams) 
 
 	if doRebase {
 		rebaseRes, err := b.DumboDBRebase(ctx, &backends.RebaseParams{
-			DBName: params.DBName,
-			Branch: branch,
-			Onto:   fetched,
+			DBName:    params.DBName,
+			Branch:    branch,
+			Onto:      fetched,
+			Committer: params.Committer,
 		})
 		if err != nil {
 			return nil, err
@@ -128,13 +129,14 @@ func (b *Backend) DumboDBPull(ctx context.Context, params *backends.PullParams) 
 	// Merge the fetched commit into the branch. A commit hash resolves cleanly;
 	// a *MergeConflictError propagates to the handler unchanged.
 	mergeRes, err := b.DumboDBMerge(ctx, &backends.MergeParams{
-		DBName:  params.DBName,
-		Into:    branch,
-		From:    fetched,
-		NoFF:    noFF,
-		FFOnly:  ffOnly,
-		Message: params.Message,
-		Author:  params.Author,
+		DBName:    params.DBName,
+		Into:      branch,
+		From:      fetched,
+		NoFF:      noFF,
+		FFOnly:    ffOnly,
+		Message:   params.Message,
+		Author:    params.Author,
+		Committer: params.Committer,
 	})
 	if err != nil {
 		return nil, err
