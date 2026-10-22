@@ -265,6 +265,9 @@ const (
 	// ErrSliceThirdArgNotPositive indicates a negative count after a position in $slice.
 	ErrSliceThirdArgNotPositive = ErrorCode(28729) // Location28729
 
+	// ErrReplaceRootNotObject indicates a $replaceRoot newRoot that is not an object.
+	ErrReplaceRootNotObject = ErrorCode(40228) // Location40228
+
 	// ErrOpMsgNoBody indicates an OP_MSG without a kind-0 body section.
 	ErrOpMsgNoBody = ErrorCode(40587) // Location40587
 

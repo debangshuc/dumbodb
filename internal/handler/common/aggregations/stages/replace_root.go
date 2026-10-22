@@ -95,7 +95,7 @@ func evaluateReplaceExpression(expr any, doc *types.Document) (*types.Document, 
 		result, ok := val.(*types.Document)
 		if !ok {
 			return nil, handlererrors.NewCommandErrorMsgWithArgument(
-				handlererrors.ErrOperationFailed,
+				handlererrors.ErrReplaceRootNotObject,
 				fmt.Sprintf(
 					"'newRoot' expression for $replaceRoot must evaluate to an object, got %s",
 					types.FormatAnyValue(val),
@@ -140,7 +140,7 @@ func evaluateReplaceExpression(expr any, doc *types.Document) (*types.Document, 
 			result, ok := val.(*types.Document)
 			if !ok {
 				return nil, handlererrors.NewCommandErrorMsgWithArgument(
-					handlererrors.ErrOperationFailed,
+					handlererrors.ErrReplaceRootNotObject,
 					fmt.Sprintf(
 						"'newRoot' expression for $replaceRoot must evaluate to an object, got %s",
 						types.FormatAnyValue(val),
@@ -157,7 +157,7 @@ func evaluateReplaceExpression(expr any, doc *types.Document) (*types.Document, 
 
 	default:
 		return nil, handlererrors.NewCommandErrorMsgWithArgument(
-			handlererrors.ErrOperationFailed,
+			handlererrors.ErrReplaceRootNotObject,
 			fmt.Sprintf(
 				"'newRoot' expression for $replaceRoot must evaluate to an object, got %s",
 				types.FormatAnyValue(expr),

@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dolthub/dumbodb/internal/handler/common/aggregations/stages"
+	"github.com/dolthub/dumbodb/internal/handler/handlererrors"
 	"github.com/dolthub/dumbodb/internal/types"
 	"github.com/dolthub/dumbodb/internal/util/iterator"
 	"github.com/dolthub/dumbodb/internal/util/must"
@@ -140,4 +141,20 @@ func TestMergeWritesInBatches(t *testing.T) {
 	require.Equal(t, 2500, total)
 	require.Greater(t, len(batches), 1)
 	require.LessOrEqual(t, readAtFirstBatch, stages.MergeBatchSize)
+}
+
+// MongoDB reports a non-object newRoot as Location40228 (parity
+// AggStreaming_ErrorAfterFirstBatch).
+func TestReplaceRootNonObjectErrorCode(t *testing.T) {
+	stage, err := stages.NewStage(must.NotFail(types.NewDocument("$replaceRoot", must.NotFail(types.NewDocument("newRoot", "$sub")))))
+	require.NoError(t, err)
+	closer := iterator.NewMultiCloser()
+	defer closer.Close()
+	input := iterator.Values(iterator.ForSlice([]*types.Document{must.NotFail(types.NewDocument("_id", int32(1), "sub", int32(5)))}))
+	out, err := stage.Process(context.Background(), input, closer)
+	require.NoError(t, err)
+	_, _, err = out.Next()
+	var cmdErr *handlererrors.CommandError
+	require.True(t, errors.As(err, &cmdErr), "%v", err)
+	require.Equal(t, handlererrors.ErrReplaceRootNotObject, cmdErr.Code())
 }
