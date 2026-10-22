@@ -94,6 +94,14 @@ func (e *CommandError) Err() error {
 	return e.err
 }
 
+// WithMessage returns a copy of e with its message replaced, keeping its code,
+// argument and labels.
+func (e *CommandError) WithMessage(msg string) *CommandError {
+	c := *e
+	c.err = errors.New(msg)
+	return &c
+}
+
 func (e *CommandError) Code() ErrorCode {
 	return e.code
 }

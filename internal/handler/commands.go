@@ -304,6 +304,7 @@ func (h *Handler) initCommands() {
 
 			res, handlerErr := next(ctx, msg)
 			handlerErr = databaseDifferCaseError(handlerErr)
+			handlerErr = redactErrorURLCredentials(handlerErr)
 			if handlerErr == nil && res != nil {
 				res = h.postProcessResponse(ctx, msg, res)
 			}
@@ -339,6 +340,28 @@ func databaseDifferCaseError(err error) error {
 		handlererrors.ErrDatabaseDifferCase,
 		fmt.Sprintf("db already exists with different case already have: [%s] trying to create [%s]", existing, requested),
 	)
+}
+
+// redactErrorURLCredentials removes credentials from URLs in an error's text,
+// which may come from DumboDB's own messages or from the storage layer, before
+// the error reaches the client or the log.
+func redactErrorURLCredentials(err error) error {
+	if err == nil {
+		return nil
+	}
+	var commandErr *handlererrors.CommandError
+	if errors.As(err, &commandErr) {
+		msg := commandErr.Err().Error()
+		if redacted := backends.RedactURLCredentials(msg); redacted != msg {
+			return commandErr.WithMessage(redacted)
+		}
+		return err
+	}
+	msg := err.Error()
+	if redacted := backends.RedactURLCredentials(msg); redacted != msg {
+		return errors.New(redacted)
+	}
+	return err
 }
 
 // logCommand logs a finished command at DEBUG, or at INFO as "Slow query" when
