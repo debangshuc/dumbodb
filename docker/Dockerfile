@@ -146,6 +146,27 @@ if [ "${1#-}" != "$1" ]; then
 	set -- dumbodb "$@"
 fi
 
+# has_flag NAME ARGS... reports whether ARGS set the Go flag NAME, in any of
+# the forms the flag package accepts (-name, --name, -name=v, --name=v).
+has_flag() {
+	name=$1
+	shift
+	for arg; do
+		case "$arg" in
+		-"$name" | --"$name" | -"$name"=* | --"$name"=*) return 0 ;;
+		esac
+	done
+	return 1
+}
+
+# As the mongo image adds --bind_ip_all, listen on every interface and use the
+# image's volume unless the command line says otherwise; a lone --port still
+# sets the port.
+if [ "$1" = "dumbodb" ]; then
+	has_flag addr "$@" || set -- "$@" --addr 0.0.0.0:27017
+	has_flag data-dir "$@" || set -- "$@" --data-dir /var/lib/dumbodb
+fi
+
 if [ "$1" = "dumbodb" ] && [ "$(id -u)" = "0" ]; then
 	find -L /var/lib/dumbodb \! -user dumbodb -exec chown dumbodb:dumbodb '{}' +
 	# Lets the server keep writing logs to the container's stdout and stderr.
@@ -161,4 +182,4 @@ VOLUME /var/lib/dumbodb
 EXPOSE 27017
 WORKDIR /var/lib/dumbodb
 ENTRYPOINT ["tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
-CMD ["--data-dir", "/var/lib/dumbodb", "--addr", "0.0.0.0:27017"]
+CMD ["dumbodb"]
