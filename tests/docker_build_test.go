@@ -271,3 +271,20 @@ func TestDockerImageInstallsPinnedMongosh(t *testing.T) {
 	require.NotContains(t, runtime, "gnupg")
 	require.NotContains(t, runtime, "curl")
 }
+
+// Docker is not available to the Go tests, so CI builds the image from source
+// and runs docker/smoke-test.sh against it.
+func TestDockerSmokeTestRunsInCI(t *testing.T) {
+	script := filepath.Join("..", "docker", "smoke-test.sh")
+	info, err := os.Stat(script)
+	require.NoError(t, err)
+	require.NotZero(t, info.Mode()&0o111, "smoke-test.sh must be executable")
+	out, err := exec.Command("bash", "-n", script).CombinedOutput()
+	require.NoError(t, err, "%s", out)
+
+	workflow, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "docker-smoke.yml"))
+	require.NoError(t, err)
+	require.Contains(t, string(workflow), "--build-arg DUMBODB_VERSION=source")
+	require.Contains(t, string(workflow), "dumbodb/docker/smoke-test.sh dumbodb:smoke")
+	require.Contains(t, string(workflow), "pull_request:")
+}

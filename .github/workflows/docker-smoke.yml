@@ -1,0 +1,31 @@
+name: Docker Image Smoke Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docker-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      # A source build needs a dumbodb/ directory in the build context.
+      - uses: actions/checkout@v6
+        with:
+          path: dumbodb
+
+      - name: Build image from source
+        run: |
+          DOCKER_BUILDKIT=1 docker build \
+            --build-arg DUMBODB_VERSION=source \
+            -f dumbodb/docker/Dockerfile \
+            -t dumbodb:smoke .
+
+      - name: Run smoke test
+        run: dumbodb/docker/smoke-test.sh dumbodb:smoke

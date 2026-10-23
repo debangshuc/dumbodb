@@ -34,21 +34,76 @@ docker run -p 27017:27017 \
   dolthub/dumbodb:latest
 ```
 
-To override flags (e.g. enable auto-commit, change log level), pass them after
-the image name:
+To set flags (e.g. enable auto-commit, change log level), pass them after the
+image name. As the mongo image adds `--bind_ip_all`, the entrypoint adds
+`--addr 0.0.0.0:27017` and `--data-dir /var/lib/dumbodb` unless you set them:
 
 ```bash
 docker run -p 27017:27017 dolthub/dumbodb:latest \
-  --data-dir /var/lib/dumbodb \
-  --addr 0.0.0.0:27017 \
   --auto-commit \
   --log-level debug
+```
+
+The image includes `mongosh`, so you can open a shell in a running container:
+
+```bash
+docker exec -it <container> mongosh
 ```
 
 Run `--help` to see all supported flags:
 
 ```bash
 docker run --rm dolthub/dumbodb:latest --help
+```
+
+## Access control
+
+The image sets up access control the way the official MongoDB image does.
+Every variable has a `DUMBO_` synonym (`DUMBO_INITDB_ROOT_USERNAME` and so on);
+setting both names to different values is an error.
+
+| Variable | Meaning |
+| --- | --- |
+| `MONGO_INITDB_ROOT_USERNAME` | Creates this user with the `root` role in `admin` and enables `--auth`. |
+| `MONGO_INITDB_ROOT_PASSWORD` | The root user's password. Required with the username. |
+| `MONGO_INITDB_DATABASE` | The database `/docker-entrypoint-initdb.d` scripts run against (default `test`). |
+
+Any of these can instead be read from a file by appending `_FILE`, as with
+Docker secrets (`MONGO_INITDB_ROOT_PASSWORD_FILE=/run/secrets/root-password`).
+
+```bash
+docker run -p 27017:27017 \
+  -e MONGO_INITDB_ROOT_USERNAME=root \
+  -e MONGO_INITDB_ROOT_PASSWORD=secret \
+  -v dumbodb-data:/var/lib/dumbodb \
+  dolthub/dumbodb:latest
+```
+
+Initialization only happens when the data directory holds no databases yet. It
+starts a temporary server on `127.0.0.1` inside the container, creates the root
+user, runs the scripts in `/docker-entrypoint-initdb.d` in sorted order (`*.sh`
+files are sourced, `*.js` files run with `mongosh` against
+`MONGO_INITDB_DATABASE`, other files are ignored), stops the temporary server,
+and starts the real one. Restarting a container with existing data skips all of
+it, so changing the variables later does not change the users.
+
+```bash
+docker run -p 27017:27017 \
+  -e MONGO_INITDB_ROOT_USERNAME=root \
+  -e MONGO_INITDB_ROOT_PASSWORD=secret \
+  -e MONGO_INITDB_DATABASE=app \
+  -v /path/to/scripts:/docker-entrypoint-initdb.d:ro \
+  dolthub/dumbodb:latest
+```
+
+Alternatively, start with `--auth` and create the first user yourself through
+the localhost exception, which allows one user to be created from inside the
+container while none exist:
+
+```bash
+docker run -d --name dumbodb -p 27017:27017 dolthub/dumbodb:latest --auth
+docker exec -it dumbodb mongosh admin \
+  --eval 'db.createUser({user: "root", pwd: passwordPrompt(), roles: ["root"]})'
 ```
 
 ## Building the image
