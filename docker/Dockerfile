@@ -180,18 +180,19 @@ RUN groupadd --gid 999 --system dumbodb && \
 # Inline rather than COPYed from the build context, whose layout differs
 # between release and source builds.
 COPY <<'EOF' /usr/local/bin/docker-entrypoint.sh
-#!/bin/sh
-set -e
+#!/bin/bash
+# Modeled on the official mongo image's entrypoint (docker-library/mongo).
+set -Eeuo pipefail
 
 # Flags alone ("docker run dumbodb --auth") are flags for the server.
-if [ "${1#-}" != "$1" ]; then
+if [ "$#" -gt 0 ] && [ "${1#-}" != "$1" ]; then
 	set -- dumbodb "$@"
 fi
 
 # has_flag NAME ARGS... reports whether ARGS set the Go flag NAME, in any of
 # the forms the flag package accepts (-name, --name, -name=v, --name=v).
 has_flag() {
-	name=$1
+	local name=$1 arg
 	shift
 	for arg; do
 		case "$arg" in
@@ -201,19 +202,164 @@ has_flag() {
 	return 1
 }
 
+# flag_value NAME ARGS... prints the value ARGS give the Go flag NAME.
+flag_value() {
+	local name=$1 value='' next='' arg
+	shift
+	for arg; do
+		if [ -n "$next" ]; then
+			value=$arg
+			next=''
+			continue
+		fi
+		case "$arg" in
+		-"$name" | --"$name") next=1 ;;
+		-"$name"=* | --"$name"=*) value=${arg#*=} ;;
+		esac
+	done
+	printf '%s' "$value"
+}
+
 # As the mongo image adds --bind_ip_all, listen on every interface and use the
 # image's volume unless the command line says otherwise; a lone --port still
 # sets the port.
-if [ "$1" = "dumbodb" ]; then
+if [ "${1:-}" = 'dumbodb' ]; then
 	has_flag addr "$@" || set -- "$@" --addr 0.0.0.0:27017
 	has_flag data-dir "$@" || set -- "$@" --data-dir /var/lib/dumbodb
 fi
 
-if [ "$1" = "dumbodb" ] && [ "$(id -u)" = "0" ]; then
+if [ "${1:-}" = 'dumbodb' ] && [ "$(id -u)" = '0' ]; then
 	find -L /var/lib/dumbodb \! -user dumbodb -exec chown dumbodb:dumbodb '{}' +
 	# Lets the server keep writing logs to the container's stdout and stderr.
 	chown --dereference dumbodb "/proc/$$/fd/1" "/proc/$$/fd/2" || :
 	exec setpriv --reuid=dumbodb --regid=dumbodb --init-groups "$0" "$@"
+fi
+
+# file_env VAR prints VAR, or the contents of the file VAR_FILE names; setting
+# both is an error.
+file_env() {
+	local var=$1 file_var="${1}_FILE"
+	local value=${!var:-} file=${!file_var:-}
+	if [ -n "$value" ] && [ -n "$file" ]; then
+		echo >&2 "error: both $var and $file_var are set (but are exclusive)"
+		return 1
+	fi
+	if [ -n "$file" ]; then
+		if [ ! -r "$file" ]; then
+			echo >&2 "error: $file_var names $file, which cannot be read"
+			return 1
+		fi
+		value=$(< "$file")
+	fi
+	printf '%s' "$value"
+}
+
+# init_var NAME prints MONGO_INITDB_NAME or its synonym DUMBO_INITDB_NAME
+# (either possibly as _FILE); both may be set only to the same value.
+init_var() {
+	local mongo dumbo
+	mongo=$(file_env "MONGO_INITDB_$1") || return 1
+	dumbo=$(file_env "DUMBO_INITDB_$1") || return 1
+	if [ -n "$mongo" ] && [ -n "$dumbo" ] && [ "$mongo" != "$dumbo" ]; then
+		echo >&2 "error: MONGO_INITDB_$1 and DUMBO_INITDB_$1 are set to different values"
+		return 1
+	fi
+	printf '%s' "${mongo:-$dumbo}"
+}
+
+# is_fresh DIR reports whether the data directory holds no databases yet;
+# DumboDB's own dot-prefixed directories do not count.
+is_fresh() {
+	local entry
+	for entry in "$1"/*/; do
+		[ -d "$entry" ] && return 1
+	done
+	return 0
+}
+
+# initialize ARGS... starts a temporary server on 127.0.0.1 with the server's
+# arguments, minus authentication, replication and listen settings, creates
+# the root user and stops it.
+initialize() {
+	local temp_args=() skip='' tls_cert='' arg pid tries
+	shift
+	for arg; do
+		if [ -n "$skip" ]; then
+			skip=''
+			continue
+		fi
+		case "$arg" in
+		-auth | --auth | -auth=* | --auth=*) continue ;;
+		-addr | --addr | -port | --port | -replSet | --replSet | -keyFile | --keyFile | \
+			-clusterAuthMode | --clusterAuthMode | -tlsMode | --tlsMode)
+			skip=1
+			continue
+			;;
+		-addr=* | --addr=* | -port=* | --port=* | -replSet=* | --replSet=* | -keyFile=* | --keyFile=* | \
+			-clusterAuthMode=* | --clusterAuthMode=* | -tlsMode=* | --tlsMode=*)
+			continue
+			;;
+		-tlsCertificateKeyFile | --tlsCertificateKeyFile | -tlsCertificateKeyFile=* | --tlsCertificateKeyFile=*)
+			tls_cert=1
+			;;
+		esac
+		temp_args+=("$arg")
+	done
+	# As in the mongo image: TLS stays available if configured, but plaintext
+	# local connections must work.
+	if [ -n "$tls_cert" ]; then
+		temp_args+=(--tlsMode allowTLS)
+	fi
+	temp_args+=(--addr 127.0.0.1:27017)
+
+	dumbodb "${temp_args[@]}" &
+	pid=$!
+
+	local mongo=(mongosh --host 127.0.0.1 --port 27017 --quiet)
+	for tries in {30..0}; do
+		if "${mongo[@]}" admin --eval 'quit(db.adminCommand({ping: 1}).ok ? 0 : 2)' > /dev/null 2>&1; then
+			break
+		fi
+		if ! kill -0 "$pid" 2> /dev/null; then
+			echo >&2 "error: the temporary server for initialization exited"
+			exit 1
+		fi
+		sleep 1
+	done
+	if [ "$tries" = 0 ]; then
+		echo >&2 "error: the temporary server for initialization did not start"
+		kill "$pid" || :
+		exit 1
+	fi
+
+	# The credentials reach mongosh through its environment, never as code.
+	INITDB_ROOT_USERNAME=$root_user INITDB_ROOT_PASSWORD=$root_password "${mongo[@]}" admin --eval '
+		db.createUser({
+			user: process.env.INITDB_ROOT_USERNAME,
+			pwd: process.env.INITDB_ROOT_PASSWORD,
+			roles: [{role: "root", db: "admin"}],
+		})' > /dev/null
+
+	kill -TERM "$pid"
+	wait "$pid" || :
+}
+
+if [ "${1:-}" = 'dumbodb' ]; then
+	root_user=$(init_var ROOT_USERNAME)
+	root_password=$(init_var ROOT_PASSWORD)
+	if [ -n "$root_user" ] || [ -n "$root_password" ]; then
+		if [ -z "$root_user" ] || [ -z "$root_password" ]; then
+			echo >&2 "error: missing 'MONGO_INITDB_ROOT_USERNAME' or 'MONGO_INITDB_ROOT_PASSWORD'"
+			echo >&2 "       (or DUMBO_INITDB_ROOT_USERNAME / DUMBO_INITDB_ROOT_PASSWORD);"
+			echo >&2 "       both must be specified for a user to be created"
+			exit 1
+		fi
+		has_flag auth "$@" || set -- "$@" --auth
+		if is_fresh "$(flag_value data-dir "$@")"; then
+			initialize "$@"
+		fi
+	fi
+	unset "${!MONGO_INITDB_@}" "${!DUMBO_INITDB_@}"
 fi
 
 exec "$@"
