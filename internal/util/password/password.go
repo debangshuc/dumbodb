@@ -15,6 +15,11 @@
 // Package password provides utilities for password hashing and verification.
 package password
 
+import (
+	"fmt"
+	"io"
+)
+
 // Password wraps a password string.
 //
 // It exist mainly to avoid issues when multiple string parameters are used.
@@ -34,4 +39,20 @@ func (p Password) Password() string {
 
 func (p Password) Empty() bool {
 	return p.p == ""
+}
+
+// Format prints a placeholder for every verb, so the plaintext cannot reach
+// errors or logs through fmt.
+func (p Password) Format(f fmt.State, _ rune) {
+	_, _ = io.WriteString(f, "<redacted>")
+}
+
+// SASLprepError reports a password SASLprep rejects, with the ICU error name
+// MongoDB reports. It never includes the password or any of its characters.
+type SASLprepError struct {
+	ICUError string
+}
+
+func (e *SASLprepError) Error() string {
+	return "Error preflighting normalization: " + e.ICUError
 }

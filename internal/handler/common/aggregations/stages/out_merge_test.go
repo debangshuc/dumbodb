@@ -30,9 +30,10 @@ import (
 
 // noopOutWriter is a writer that captures the call args without doing anything.
 func noopOutWriter(written *[]*types.Document) stages.OutWriter {
-	return func(_ context.Context, _, _ string, docs []*types.Document) error {
-		*written = append(*written, docs...)
-		return nil
+	return func(_ context.Context, _, _ string, docs types.DocumentsIterator) error {
+		all, err := iterator.ConsumeValues(docs)
+		*written = append(*written, all...)
+		return err
 	}
 }
 

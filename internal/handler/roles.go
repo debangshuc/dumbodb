@@ -250,6 +250,9 @@ func normalizeRoleRefs(roles *types.Array, defaultDB string) (*types.Array, erro
 			if !ok {
 				return nil, handlererrors.NewCommandErrorMsg(handlererrors.ErrBadValue, "role db must be a string")
 			}
+			if err := common.ValidateDatabaseName(dbStr); err != nil {
+				return nil, err
+			}
 
 			out.Append(must.NotFail(types.NewDocument("role", roleStr, "db", dbStr)))
 		default:

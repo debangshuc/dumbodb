@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/FerretDB/wire"
+	"github.com/google/uuid"
 
 	"github.com/dolthub/dumbodb/internal/backends"
 	"github.com/dolthub/dumbodb/internal/clientconn/conninfo"
@@ -1142,42 +1143,80 @@ func processStagesStats(ctx context.Context, closer *iterator.MultiCloser, p *st
 	return iter, nil
 }
 
-// makeOutWriter returns an OutWriter callback that replaces the target collection
-// with the provided documents. It drops the existing collection (if any),
-// then inserts all documents into a fresh collection.
+// outBatchSize and outBatchBytes bound how much of $out's input is held before
+// it is inserted.
+const (
+	outBatchSize  = 1000
+	outBatchBytes = 16 * 1024 * 1024
+)
+
+// makeOutWriter returns an OutWriter callback that replaces the target
+// collection with the provided documents. As in MongoDB, they are written in
+// batches to a temporary collection that is then renamed over the target, so
+// the target is unchanged if the pipeline or a write fails.
 func makeOutWriter(b backends.Backend, currentDB string) stages.OutWriter { //nolint:unparam // currentDB used by caller
-	return func(ctx context.Context, dbName, collName string, docs []*types.Document) error {
+	return func(ctx context.Context, dbName, collName string, docs types.DocumentsIterator) error {
 		db, err := b.Database(dbName)
 		if err != nil {
 			return lazyerrors.Error(err)
 		}
 
-		// Drop collection if it exists to match MongoDB $out semantics.
-		dropErr := db.DropCollection(ctx, &backends.DropCollectionParams{Name: collName})
-		if dropErr != nil && !backends.ErrorCodeIs(dropErr, backends.ErrorCodeCollectionDoesNotExist) {
-			return lazyerrors.Error(dropErr)
+		tmpName := "tmp.agg_out." + uuid.NewString()
+		if err = db.CreateCollection(ctx, &backends.CreateCollectionParams{Name: tmpName}); err != nil {
+			return lazyerrors.Error(err)
 		}
+		renamed := false
+		defer func() {
+			if !renamed {
+				_ = db.DropCollection(ctx, &backends.DropCollectionParams{Name: tmpName})
+			}
+		}()
 
-		// InsertAll creates the database and collection automatically if needed.
-		coll, err := db.Collection(collName)
+		tmp, err := db.Collection(tmpName)
 		if err != nil {
 			return lazyerrors.Error(err)
 		}
 
-		if len(docs) == 0 {
-			// Create an empty collection explicitly so $out with zero results still leaves a collection.
-			if createErr := db.CreateCollection(ctx, &backends.CreateCollectionParams{Name: collName}); createErr != nil {
-				if !backends.ErrorCodeIs(createErr, backends.ErrorCodeCollectionAlreadyExists) {
-					return lazyerrors.Error(createErr)
-				}
+		var batch []*types.Document
+		var batchBytes int
+		flush := func() error {
+			if len(batch) == 0 {
+				return nil
 			}
-
-			return nil
+			_, insertErr := tmp.InsertAll(ctx, &backends.InsertAllParams{Docs: batch})
+			batch, batchBytes = nil, 0
+			return insertErr
 		}
 
-		_, err = coll.InsertAll(ctx, &backends.InsertAllParams{Docs: docs})
+		for {
+			_, doc, nextErr := docs.Next()
+			if errors.Is(nextErr, iterator.ErrIteratorDone) {
+				break
+			}
+			if nextErr != nil {
+				return nextErr
+			}
+			if !doc.Has("_id") {
+				doc.Set("_id", types.NewObjectID())
+			}
+			batch = append(batch, doc)
+			batchBytes += doc.BSONSize()
+			if len(batch) >= outBatchSize || batchBytes >= outBatchBytes {
+				if err = flush(); err != nil {
+					return err
+				}
+			}
+		}
+		if err = flush(); err != nil {
+			return err
+		}
 
-		return err
+		if err = db.RenameCollection(ctx, &backends.RenameCollectionParams{OldName: tmpName, NewName: collName, DropTarget: true}); err != nil {
+			return lazyerrors.Error(err)
+		}
+		renamed = true
+
+		return nil
 	}
 }
 
@@ -1205,6 +1244,11 @@ func makeMergeWriter(b backends.Backend, currentDB string) stages.MergeFunc { //
 				backends.ErrorCodeIs(err, backends.ErrorCodeDatabaseDoesNotExist) {
 				// Collection doesn't exist yet; all docs are "not matched".
 				if params.WhenNotMatched == "insert" {
+					for _, doc := range params.Docs {
+						if !doc.Has("_id") {
+							doc.Set("_id", types.NewObjectID())
+						}
+					}
 					_, insertErr := coll.InsertAll(ctx, &backends.InsertAllParams{Docs: params.Docs})
 					return insertErr
 				}
@@ -1215,22 +1259,34 @@ func makeMergeWriter(b backends.Backend, currentDB string) stages.MergeFunc { //
 			return lazyerrors.Error(err)
 		}
 
-		existingDocs, err := iterator.ConsumeValues(qRes.Iter)
-		if err != nil {
-			return lazyerrors.Error(err)
-		}
-
 		type existingEntry struct {
 			doc   *types.Document
 			index int
 		}
 
-		existingMap := make(map[string]*existingEntry, len(existingDocs))
-
-		for i, existing := range existingDocs {
-			key := buildMergeKey(existing, params.On)
-			existingMap[key] = &existingEntry{doc: existing, index: i}
+		// Only the target documents this batch can match are kept, so memory
+		// follows the batch rather than the target collection.
+		wanted := make(map[string]bool, len(params.Docs))
+		for _, incoming := range params.Docs {
+			wanted[buildMergeKey(incoming, params.On)] = true
 		}
+
+		existingMap := make(map[string]*existingEntry, len(params.Docs))
+
+		for i := 0; ; i++ {
+			_, existing, nextErr := qRes.Iter.Next()
+			if errors.Is(nextErr, iterator.ErrIteratorDone) {
+				break
+			}
+			if nextErr != nil {
+				qRes.Iter.Close()
+				return lazyerrors.Error(nextErr)
+			}
+			if key := buildMergeKey(existing, params.On); wanted[key] {
+				existingMap[key] = &existingEntry{doc: existing, index: i}
+			}
+		}
+		qRes.Iter.Close()
 
 		var toInsert []*types.Document
 		var toUpdate []*types.Document
@@ -1273,6 +1329,9 @@ func makeMergeWriter(b backends.Backend, currentDB string) stages.MergeFunc { //
 			} else {
 				switch params.WhenNotMatched {
 				case "insert":
+					if !incoming.Has("_id") {
+						incoming.Set("_id", types.NewObjectID())
+					}
 					toInsert = append(toInsert, incoming)
 
 				case "discard":

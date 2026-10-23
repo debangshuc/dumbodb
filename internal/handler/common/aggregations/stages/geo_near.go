@@ -16,6 +16,7 @@ package stages
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	stdsort "sort"
@@ -219,11 +220,11 @@ func newGeoNear(stage *types.Document) (aggregations.Stage, error) {
 	return g, nil
 }
 
+// Process reads its input incrementally but must sort what it keeps by
+// distance. MongoDB streams $geoNear from a geo index; DumboDB sorts in memory,
+// so the documents it keeps are limited like $sort's.
 func (g *geoNear) Process(ctx context.Context, iter types.DocumentsIterator, closer *iterator.MultiCloser) (types.DocumentsIterator, error) {
-	docs, err := iterator.ConsumeValues(iter)
-	if err != nil {
-		return nil, err
-	}
+	defer iter.Close()
 
 	type docWithDist struct {
 		doc  *types.Document
@@ -231,8 +232,17 @@ func (g *geoNear) Process(ctx context.Context, iter types.DocumentsIterator, clo
 	}
 
 	var results []docWithDist
+	budget := common.NewStageBudget("$geoNear")
 
-	for _, doc := range docs {
+	for {
+		_, doc, err := iter.Next()
+		if errors.Is(err, iterator.ErrIteratorDone) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
 		// Apply optional query filter.
 		if g.query != nil {
 			match, err := common.FilterDocument(doc, g.query)
@@ -276,6 +286,9 @@ func (g *geoNear) Process(ctx context.Context, iter types.DocumentsIterator, clo
 			}
 		}
 
+		if err = budget.ChargeDocument(out); err != nil {
+			return nil, err
+		}
 		results = append(results, docWithDist{doc: out, dist: dist})
 	}
 

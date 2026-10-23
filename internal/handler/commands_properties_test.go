@@ -142,6 +142,15 @@ func TestCommands_NoCustomReplicationCommands(t *testing.T) {
 	}
 }
 
+// debugError was inherited from FerretDB, has no MongoDB counterpart, and lets
+// any client with auth off panic the server on purpose.
+func TestCommands_NoDebugErrorCommand(t *testing.T) {
+	h := handlerForTest(t)
+	if _, ok := h.Commands()["debugError"]; ok {
+		t.Fatal("debugError is registered")
+	}
+}
+
 func TestCommands_ReplicationRejectsMutations(t *testing.T) {
 	h := configuredReplicationHandler(t)
 	h.initCommands()
@@ -252,4 +261,25 @@ func contains(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// On a case-insensitive filesystem "ADMIN" is the admin directory; MongoDB
+// refuses names differing only in case from an existing database.
+func TestCommands_DatabaseDifferCase(t *testing.T) {
+	h := handlerForTest(t)
+	ctx := conninfo.Ctx(context.Background(), conninfo.New())
+	create := func(db string) error {
+		_, err := h.Commands()["create"].Handler(ctx, must.NotFail(documentOpMsg(must.NotFail(types.NewDocument(
+			"create", "c", "$db", db,
+		)))))
+		return err
+	}
+
+	assert.NoError(t, create("shop"))
+	err := create("SHOP")
+	var commandErr *handlererrors.CommandError
+	if assert.ErrorAs(t, err, &commandErr) {
+		assert.Equal(t, handlererrors.ErrDatabaseDifferCase, commandErr.Code())
+		assert.Contains(t, commandErr.Error(), "db already exists with different case already have: [shop] trying to create [SHOP]")
+	}
 }

@@ -74,6 +74,9 @@ type Handler struct {
 	topologyChanged chan struct{}
 
 	bootstrapLatch atomic.Bool
+	// bootstrapMu admits one localhost-exception createUser at a time, so
+	// concurrent callers cannot all see zero users.
+	bootstrapMu sync.Mutex
 
 	authGen     atomic.Uint64
 	logicalTime atomic.Uint64

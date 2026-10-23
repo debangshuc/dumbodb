@@ -269,6 +269,24 @@ func (h *Handler) MsgInsert(connCtx context.Context, msg *wire.OpMsg) (*wire.OpM
 				return nil, handlererrors.NewCommandErrorMsgWithArgument(handlererrors.ErrInvalidNamespace, errMsg, "insert")
 			}
 
+			// MongoDB reports a database name differing only in case as a
+			// write error of the document that would have created it.
+			var differCase *backends.Error
+			if errors.As(err, &differCase) && differCase.Code() == backends.ErrorCodeDatabaseDifferCase {
+				existing, requested := differCase.DifferCaseNames()
+				writeErrors = append(writeErrors, &mongo.WriteError{
+					Index: docsIndexes[j],
+					Code:  int(handlererrors.ErrDatabaseDifferCase),
+					Message: fmt.Sprintf(
+						"db already exists with different case already have: [%s] trying to create [%s]", existing, requested,
+					),
+				})
+				if params.Ordered {
+					break
+				}
+				continue
+			}
+
 			if !backends.ErrorCodeIs(err, backends.ErrorCodeInsertDuplicateID) {
 				return nil, lazyerrors.Error(err)
 			}

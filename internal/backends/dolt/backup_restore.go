@@ -176,6 +176,9 @@ func (b *Backend) installRestoredDatabase(stageDir, dbName string, force bool) e
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	if err := b.checkNewDatabaseName(dbName); err != nil {
+		return fmt.Errorf("dumboBackup restore: %w", err)
+	}
 	liveDir := filepath.Join(b.dataDir, dbName)
 	_, open := b.dbs[dbName]
 	_, statErr := os.Stat(liveDir)

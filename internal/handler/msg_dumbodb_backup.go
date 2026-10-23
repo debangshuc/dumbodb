@@ -99,20 +99,20 @@ func (h *Handler) MsgDumboDBBackup(connCtx context.Context, msg *wire.OpMsg) (*w
 	case "list":
 		arr := types.MakeArray(len(res.Backups))
 		for _, bk := range res.Backups {
-			arr.Append(must.NotFail(types.NewDocument("name", bk.Name, "url", bk.URL)))
+			arr.Append(must.NotFail(types.NewDocument("name", bk.Name, "url", backends.RedactURLCredentials(bk.URL))))
 		}
 		return documentOpMsg(must.NotFail(types.NewDocument("backups", arr, "ok", float64(1))))
 	case "add":
 		out := must.NotFail(types.NewDocument())
 		if len(res.Backups) == 1 {
 			out.Set("name", res.Backups[0].Name)
-			out.Set("url", res.Backups[0].URL)
+			out.Set("url", backends.RedactURLCredentials(res.Backups[0].URL))
 		}
 		out.Set("ok", float64(1))
 		return documentOpMsg(out)
 	case "sync", "sync-url":
 		return documentOpMsg(must.NotFail(types.NewDocument(
-			"url", res.URL,
+			"url", backends.RedactURLCredentials(res.URL),
 			"root", res.Root,
 			"upToDate", res.UpToDate,
 			"ok", float64(1),
@@ -120,7 +120,7 @@ func (h *Handler) MsgDumboDBBackup(connCtx context.Context, msg *wire.OpMsg) (*w
 	case "restore":
 		return documentOpMsg(must.NotFail(types.NewDocument(
 			"db", res.DB,
-			"url", res.URL,
+			"url", backends.RedactURLCredentials(res.URL),
 			"root", res.Root,
 			"ok", float64(1),
 		)))

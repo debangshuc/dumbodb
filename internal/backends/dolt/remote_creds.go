@@ -148,7 +148,7 @@ func (b *Backend) remoteDBParams(scheme string) (map[string]interface{}, error) 
 
 	if isGitScheme(scheme) {
 		cacheRoot := filepath.Join(b.dataDir, gitRemoteCacheRoot)
-		if err := os.MkdirAll(cacheRoot, 0o755); err != nil {
+		if err := os.MkdirAll(cacheRoot, 0o700); err != nil {
 			return nil, fmt.Errorf("creating git remote cache root: %w", err)
 		}
 		params[dbfactory.GitCacheRootParam] = cacheRoot

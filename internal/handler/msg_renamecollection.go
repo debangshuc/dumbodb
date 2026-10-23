@@ -17,6 +17,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/FerretDB/wire"
 
@@ -118,6 +119,10 @@ func (h *Handler) MsgRenameCollection(connCtx context.Context, msg *wire.OpMsg) 
 		)
 	}
 
+	if err = checkSystemCollectionRename(oldDBName, oldCName, newDBName, newCName, command); err != nil {
+		return nil, err
+	}
+
 	if oldDBName != newDBName {
 		return nil, handlererrors.NewCommandErrorMsgWithArgument(
 			handlererrors.ErrNotImplemented,
@@ -199,4 +204,49 @@ func (h *Handler) MsgRenameCollection(connCtx context.Context, msg *wire.OpMsg) 
 func isAdminDatabase(encoded string) bool {
 	base, _ := backends.SplitEncodedDBName(encoded)
 	return base == "admin"
+}
+
+// checkSystemCollectionRename refuses renames MongoDB refuses: to or from
+// system.users and system.js, from other system collections, and to any system
+// collection. It also keeps renames out of the reserved admin database, whose
+// contents only the user management commands may change.
+func checkSystemCollectionRename(oldDBName, oldCName, newDBName, newCName, command string) error {
+	for _, protected := range []string{"system.users", "system.js"} {
+		if oldCName == protected || newCName == protected {
+			return handlererrors.NewCommandErrorMsgWithArgument(
+				handlererrors.ErrIllegalOperation,
+				fmt.Sprintf("renaming %[1]s collection or renaming to %[1]s is not allowed", protected),
+				command,
+			)
+		}
+	}
+
+	for _, db := range []string{oldDBName, newDBName} {
+		if isAdminDatabase(db) {
+			return handlererrors.NewCommandErrorMsgWithArgument(
+				handlererrors.ErrIllegalOperation,
+				fmt.Sprintf("cannot %s in %q: the admin database is reserved; manage its contents through the user management commands", command, db),
+				command,
+			)
+		}
+	}
+
+	if strings.HasPrefix(oldCName, "system.") {
+		return handlererrors.NewCommandErrorMsgWithArgument(
+			handlererrors.ErrIllegalOperation,
+			"error with source namespace: cannot write to "+oldDBName+"."+oldCName,
+			command,
+		)
+	}
+
+	if !strings.HasPrefix(newCName, "system.") {
+		return nil
+	}
+
+	newName := newDBName + "." + newCName
+	msg := "error with target namespace: Invalid system namespace: " + newName
+	if newCName == "system.views" {
+		msg = "error with target namespace: cannot write to " + newName
+	}
+	return handlererrors.NewCommandErrorMsgWithArgument(handlererrors.ErrIllegalOperation, msg, command)
 }

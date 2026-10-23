@@ -60,6 +60,7 @@ func init() {
 }
 
 func main() {
+	restrictFileCreationMask()
 	handleVersionFlag()
 
 	logging.Setup(&logging.NewHandlerOpts{

@@ -16,6 +16,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/dolthub/dumbodb/internal/backends"
 	"github.com/dolthub/dumbodb/internal/clientconn/conninfo"
+	"github.com/dolthub/dumbodb/internal/handler/common"
 	"github.com/dolthub/dumbodb/internal/handler/handlererrors"
 	"github.com/dolthub/dumbodb/internal/types"
 	"github.com/dolthub/dumbodb/internal/util/lazyerrors"
@@ -101,7 +103,6 @@ func (h *Handler) initCommands() {
 		"create":                   {Handler: h.MsgCreate, MutatesState: alwaysMutatesState, Help: "Creates the collection."},
 		"currentOp":                {Handler: h.MsgCurrentOp, Help: "Returns information about operations currently in progress."},
 		"dataSize":                 {Handler: h.MsgDataSize, Help: "Returns the size of the collection in bytes."},
-		"debugError":               {Handler: h.MsgDebugError, Help: "Returns error for debugging."},
 		"delete":                   {Handler: h.MsgDelete, MutatesState: alwaysMutatesState, WritesData: true, Help: "Deletes documents matched by the query."},
 		"distinct":                 {Handler: h.MsgDistinct, Help: "Returns an array of distinct values for the given field."},
 		"dropIndexes":              {Handler: h.MsgDropIndexes, MutatesState: alwaysMutatesState, Help: "Drops indexes on a collection."},
@@ -130,9 +131,9 @@ func (h *Handler) initCommands() {
 		"abortTransaction":         {Handler: h.MsgAbortTransaction, Help: "Aborts a MongoDB transaction."},
 		"endSessions":              {Handler: h.MsgEndSessions, anonymous: true, Help: "Ends server sessions."},
 		"ping":                     {Handler: h.MsgPing, anonymous: true, Help: "Returns a pong response."},
-		"replSetGetConfig":         {Handler: h.MsgReplSetGetConfig, anonymous: true},
-		"replSetGetRBID":           {Handler: h.MsgReplSetGetRBID, anonymous: true},
-		"replSetGetStatus":         {Handler: h.MsgReplSetGetStatus, anonymous: true},
+		"replSetGetConfig":         {Handler: h.MsgReplSetGetConfig},
+		"replSetGetRBID":           {Handler: h.MsgReplSetGetRBID, membershipOnly: true},
+		"replSetGetStatus":         {Handler: h.MsgReplSetGetStatus},
 		"replSetHeartbeat":         {Handler: h.MsgReplSetHeartbeat, anonymous: true, membershipOnly: true},
 		"replSetUpdatePosition":    {Handler: h.MsgReplSetUpdatePositionUnsupported, anonymous: true, membershipOnly: true},
 		"rotateCertificates":       {Handler: h.MsgRotateCertificates},
@@ -252,6 +253,12 @@ func (h *Handler) initCommands() {
 				if authenticated {
 					if err := checkAuthentication(ctx, wireCommandName(msg), h.L); err != nil {
 						if h.localhostExceptionApplies(ctx, wireCommandName(msg)) {
+							h.bootstrapMu.Lock()
+							defer h.bootstrapMu.Unlock()
+							// Another caller may have bootstrapped while this one waited.
+							if !h.localhostExceptionApplies(ctx, wireCommandName(msg)) {
+								return nil, err
+							}
 							res, createErr := authed(ctx, msg)
 							if createErr == nil {
 								h.bootstrapLatch.Store(true)
@@ -282,13 +289,22 @@ func (h *Handler) initCommands() {
 
 		l := h.L
 		next := inner
+		requiresPlainDB := plainDatabaseCommands[canonicalName]
 		cmd.Handler = func(ctx context.Context, msg *wire.OpMsg) (*wire.OpMsg, error) {
 			start := time.Now()
+			if requiresPlainDB {
+				_, db, _ := wireCommandTarget(msg)
+				if err := common.ValidateDatabaseName(db); err != nil {
+					return nil, err
+				}
+			}
 			if err := h.observeLogicalTime(ctx, msg); err != nil {
 				return nil, err
 			}
 
 			res, handlerErr := next(ctx, msg)
+			handlerErr = databaseDifferCaseError(handlerErr)
+			handlerErr = redactErrorURLCredentials(handlerErr)
 			if handlerErr == nil && res != nil {
 				res = h.postProcessResponse(ctx, msg, res)
 			}
@@ -298,6 +314,54 @@ func (h *Handler) initCommands() {
 			return res, handlerErr
 		}
 	}
+}
+
+// plainDatabaseCommands store or look up users and roles, whose _ids are
+// "<db>.<name>". Their $db must be a valid database name with no ref suffix,
+// so no two principals share an _id.
+var plainDatabaseCommands = map[string]bool{
+	"authenticate": true, "saslStart": true, "saslContinue": true,
+	"createUser": true, "updateUser": true, "dropUser": true, "dropAllUsersFromDatabase": true,
+	"usersInfo": true, "grantRolesToUser": true, "revokeRolesFromUser": true,
+	"createRole": true, "updateRole": true, "dropRole": true, "dropAllRolesFromDatabase": true,
+	"rolesInfo": true, "grantRolesToRole": true, "revokeRolesFromRole": true,
+	"grantPrivilegesToRole": true, "revokePrivilegesFromRole": true,
+}
+
+// databaseDifferCaseError reports a backend DatabaseDifferCase error as
+// MongoDB does, whichever command reached it.
+func databaseDifferCaseError(err error) error {
+	var backendErr *backends.Error
+	if !errors.As(err, &backendErr) || backendErr.Code() != backends.ErrorCodeDatabaseDifferCase {
+		return err
+	}
+	existing, requested := backendErr.DifferCaseNames()
+	return handlererrors.NewCommandErrorMsg(
+		handlererrors.ErrDatabaseDifferCase,
+		fmt.Sprintf("db already exists with different case already have: [%s] trying to create [%s]", existing, requested),
+	)
+}
+
+// redactErrorURLCredentials removes credentials from URLs in an error's text,
+// which may come from DumboDB's own messages or from the storage layer, before
+// the error reaches the client or the log.
+func redactErrorURLCredentials(err error) error {
+	if err == nil {
+		return nil
+	}
+	var commandErr *handlererrors.CommandError
+	if errors.As(err, &commandErr) {
+		msg := commandErr.Err().Error()
+		if redacted := backends.RedactURLCredentials(msg); redacted != msg {
+			return commandErr.WithMessage(redacted)
+		}
+		return err
+	}
+	msg := err.Error()
+	if redacted := backends.RedactURLCredentials(msg); redacted != msg {
+		return errors.New(redacted)
+	}
+	return err
 }
 
 // logCommand logs a finished command at DEBUG, or at INFO as "Slow query" when

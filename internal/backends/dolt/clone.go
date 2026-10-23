@@ -48,6 +48,9 @@ func (b *Backend) DumboDBClone(ctx context.Context, params *backends.CloneParams
 	if isReservedDatabase(params.As) {
 		return nil, fmt.Errorf("dumboClone: %q is a reserved database name", params.As)
 	}
+	if err := b.checkNewDatabaseName(params.As); err != nil {
+		return nil, fmt.Errorf("dumboClone: %w", err)
+	}
 	if _, err := os.Stat(filepath.Join(b.dataDir, params.As)); err == nil {
 		return nil, fmt.Errorf("dumboClone: database %q already exists", params.As)
 	}

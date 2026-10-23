@@ -117,6 +117,9 @@ func (h *Handler) MsgUpdateUser(connCtx context.Context, msg *wire.OpMsg) (*wire
 
 		credentials, err = users.MakeCredentials(username, password.WrapPassword(userPassword), mechanisms)
 		if err != nil {
+			if prepErr, ok := saslprepCommandError(err); ok {
+				return nil, prepErr
+			}
 			return nil, err
 		}
 	}

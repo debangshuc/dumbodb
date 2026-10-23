@@ -117,7 +117,7 @@ func TestVersioningCommandsAreAuthorized(t *testing.T) {
 	})
 
 	t.Run("UnlistedCommandsAreDenied", func(t *testing.T) {
-		requireCode(t, runIn(admin, "admin", bson.D{{Key: "debugError", Value: "x"}}), codeUnauthorized)
+		requireCode(t, runIn(admin, "admin", bson.D{{Key: "replSetGetRBID", Value: 1}}), codeUnauthorized)
 		require.NoError(t, runIn(reader, "appdb", bson.D{{Key: "listCommands", Value: 1}}))
 	})
 

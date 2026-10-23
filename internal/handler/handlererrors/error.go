@@ -63,6 +63,12 @@ const (
 
 	ErrIllegalOperation = ErrorCode(20) // IllegalOperation
 
+	// ErrDatabaseDifferCase indicates a database name differing only in case from an existing one.
+	ErrDatabaseDifferCase = ErrorCode(13297) // DatabaseDifferCase
+
+	// ErrInvalidBSON indicates a request document that is not valid BSON.
+	ErrInvalidBSON = ErrorCode(22) // InvalidBSON
+
 	// ErrNamespaceNotFound indicates that a collection is not found.
 	ErrNamespaceNotFound = ErrorCode(26) // NamespaceNotFound
 
@@ -255,6 +261,36 @@ const (
 
 	// ErrSliceFirstArg for $slice indicates that the first argument is not an array.
 	ErrSliceFirstArg = ErrorCode(28724) // Location28724
+
+	// ErrSliceThirdArgNotPositive indicates a negative count after a position in $slice.
+	ErrSliceThirdArgNotPositive = ErrorCode(28729) // Location28729
+
+	// ErrReplaceRootNotObject indicates a $replaceRoot newRoot that is not an object.
+	ErrReplaceRootNotObject = ErrorCode(40228) // Location40228
+
+	// Math expression errors, named for MongoDB's checks.
+	ErrCannotConvertToLong     = ErrorCode(16004)   // Location16004
+	ErrModByZero               = ErrorCode(16610)   // Location16610
+	ErrModNonNumeric           = ErrorCode(16611)   // Location16611
+	ErrModByZeroDecimal        = ErrorCode(5733415) // Location5733415
+	ErrSqrtNegative            = ErrorCode(28714)   // Location28714
+	ErrAbsOfLongMin            = ErrorCode(28680)   // Location28680
+	ErrLogNonNumericArgument   = ErrorCode(28756)   // Location28756
+	ErrLogNonNumericBase       = ErrorCode(28757)   // Location28757
+	ErrLogNonPositiveArgument  = ErrorCode(28758)   // Location28758
+	ErrLogInvalidBase          = ErrorCode(28759)   // Location28759
+	ErrLog10NonPositive        = ErrorCode(28761)   // Location28761
+	ErrPowNonNumericBase       = ErrorCode(28762)   // Location28762
+	ErrPowNonNumericExponent   = ErrorCode(28763)   // Location28763
+	ErrPowZeroNegativeExponent = ErrorCode(28764)   // Location28764
+	ErrMathNonNumeric          = ErrorCode(28765)   // Location28765
+	ErrLnNonPositive           = ErrorCode(28766)   // Location28766
+	ErrRoundNonNumeric         = ErrorCode(51081)   // Location51081
+	ErrRoundPlaceNotIntegral   = ErrorCode(51082)   // Location51082
+	ErrRoundPlaceOutOfRange    = ErrorCode(51083)   // Location51083
+
+	// ErrOpMsgNoBody indicates an OP_MSG without a kind-0 body section.
+	ErrOpMsgNoBody = ErrorCode(40587) // Location40587
 
 	// ErrStageUnsetNoPath indicates that $unwind aggregation stage is empty.
 	ErrStageUnsetNoPath = ErrorCode(31119) // Location31119

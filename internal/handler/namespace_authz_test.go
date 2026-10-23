@@ -90,3 +90,37 @@ func TestRenameCollection_RequiresAdminDatabase(t *testing.T) {
 	require.True(t, ok, "want CommandError, got %v", err)
 	require.Equal(t, handlererrors.ErrUnauthorized, code)
 }
+
+func rolesInfoMsg(t *testing.T, db string, arg any) *wire.OpMsg {
+	t.Helper()
+	return must.NotFail(documentOpMsg(must.NotFail(types.NewDocument("rolesInfo", arg, "$db", db))))
+}
+
+func roleRef(role, db string) *types.Document {
+	return must.NotFail(types.NewDocument("role", role, "db", db))
+}
+
+// Before the fix rolesInfo only checked viewRole on $db, so a user
+// administrator of one database could read role definitions from any other.
+func TestAuthorize_RolesInfoChecksEachRoleDatabase(t *testing.T) {
+	h := authGateHandler(t, true)
+	createUserWithRole(t, h, "x", "xadmin", "userAdmin")
+	createUserWithRole(t, h, "x", "xreader", "read")
+
+	xadmin := authCtx("xadmin", "x")
+	xreader := authCtx("xreader", "x")
+
+	require.NoError(t, h.authorize(xadmin, rolesInfoMsg(t, "x", int32(1))))
+	require.NoError(t, h.authorize(xadmin, rolesInfoMsg(t, "x", "anyRole")))
+	require.NoError(t, h.authorize(xadmin, rolesInfoMsg(t, "x", roleRef("anyRole", "x"))))
+
+	require.True(t, isUnauthorized(t, h.authorize(xadmin, rolesInfoMsg(t, "x", roleRef("secret", "victim")))))
+	require.True(t, isUnauthorized(t, h.authorize(xadmin, rolesInfoMsg(t, "x",
+		must.NotFail(types.NewArray(roleRef("anyRole", "x"), roleRef("secret", "victim")))))))
+	require.True(t, isUnauthorized(t, h.authorize(xadmin, rolesInfoMsg(t, "victim", int32(1)))))
+
+	// As in MongoDB, users may always look up roles granted to them directly.
+	require.NoError(t, h.authorize(xreader, rolesInfoMsg(t, "x", roleRef("read", "x"))))
+	require.True(t, isUnauthorized(t, h.authorize(xreader, rolesInfoMsg(t, "x", roleRef("readWrite", "x")))))
+	require.True(t, isUnauthorized(t, h.authorize(xreader, rolesInfoMsg(t, "x", int32(1)))))
+}

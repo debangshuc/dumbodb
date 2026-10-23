@@ -16,6 +16,7 @@ package stages
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/dolthub/dumbodb/internal/handler/common/aggregations"
@@ -23,6 +24,13 @@ import (
 	"github.com/dolthub/dumbodb/internal/types"
 	"github.com/dolthub/dumbodb/internal/util/iterator"
 	"github.com/dolthub/dumbodb/internal/util/lazyerrors"
+)
+
+// MergeBatchSize is the most documents $merge passes to its MergeFunc at
+// once; mergeBatchBytes bounds a batch's total BSON size.
+const (
+	MergeBatchSize  = 1000
+	mergeBatchBytes = 16 * 1024 * 1024
 )
 
 type MergeParams struct {
@@ -336,22 +344,49 @@ func parseMergeWhenNotMatched(spec *types.Document, s *merge) error {
 
 // Process implements Stage interface.
 //
-// It consumes all documents from iter and delegates to the MergeFunc callback.
-// Like $out, $merge returns an empty iterator (no documents to the caller).
+// It reads iter in batches of at most MergeBatchSize documents and
+// mergeBatchBytes, passing each to the MergeFunc callback as it fills. Like
+// $out, $merge returns an empty iterator (no documents to the caller).
 func (s *merge) Process(ctx context.Context, iter types.DocumentsIterator, closer *iterator.MultiCloser) (types.DocumentsIterator, error) { //nolint:lll // for readability
-	docs, err := iterator.ConsumeValues(iter)
-	if err != nil {
-		return nil, lazyerrors.Error(err)
+	defer iter.Close()
+
+	var batch []*types.Document
+	var batchBytes int
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		err := s.merger(ctx, &MergeParams{
+			DBName:         s.targetDB,
+			CollName:       s.targetColl,
+			Docs:           batch,
+			On:             s.on,
+			WhenMatched:    s.whenMatched,
+			WhenNotMatched: s.whenNotMatched,
+		})
+		batch, batchBytes = nil, 0
+		return err
 	}
 
-	if err = s.merger(ctx, &MergeParams{
-		DBName:         s.targetDB,
-		CollName:       s.targetColl,
-		Docs:           docs,
-		On:             s.on,
-		WhenMatched:    s.whenMatched,
-		WhenNotMatched: s.whenNotMatched,
-	}); err != nil {
+	for {
+		_, doc, err := iter.Next()
+		if errors.Is(err, iterator.ErrIteratorDone) {
+			break
+		}
+		if err != nil {
+			return nil, lazyerrors.Error(err)
+		}
+
+		batch = append(batch, doc)
+		batchBytes += doc.BSONSize()
+		if len(batch) >= MergeBatchSize || batchBytes >= mergeBatchBytes {
+			if err = flush(); err != nil {
+				return nil, lazyerrors.Error(err)
+			}
+		}
+	}
+
+	if err := flush(); err != nil {
 		return nil, lazyerrors.Error(err)
 	}
 

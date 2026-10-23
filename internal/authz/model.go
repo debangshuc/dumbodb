@@ -68,6 +68,8 @@ const (
 	ActionListSessions                 Action = "listSessions"
 	ActionInprog                       Action = "inprog"
 	ActionGetCmdLineOpts               Action = "getCmdLineOpts"
+	ActionReplSetGetStatus             Action = "replSetGetStatus"
+	ActionReplSetGetConfig             Action = "replSetGetConfig"
 
 	AnyAction Action = "anyAction"
 )

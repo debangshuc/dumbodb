@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"time"
 
@@ -40,8 +41,18 @@ const largeMessageThreshold = 1 << 20
 // header arrives, so a client sending only headers could pin that much per
 // connection. Large and compressed messages are first read into a buffer that
 // grows with the bytes actually received.
-func readMessage(r *bufio.Reader) (*wire.MsgHeader, wire.MsgBody, Compressor, error) {
-	header, err := r.Peek(wire.MsgHeaderLen)
+//
+// The wire parser can panic on some malformed messages, such as a checksummed
+// OP_MSG with no room left for the checksum; those are returned as errors, so
+// the connection closes without logging a stack trace.
+func readMessage(r *bufio.Reader) (header *wire.MsgHeader, body wire.MsgBody, compressor Compressor, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			header, body, compressor, err = nil, nil, CompressorNone, fmt.Errorf("malformed message: %v", p)
+		}
+	}()
+
+	prefix, err := r.Peek(wire.MsgHeaderLen)
 	if err != nil {
 		h, body, err := wire.ReadMessage(r)
 		if err == nil {
@@ -50,8 +61,8 @@ func readMessage(r *bufio.Reader) (*wire.MsgHeader, wire.MsgBody, Compressor, er
 		return h, body, CompressorNone, err
 	}
 
-	length := int64(binary.LittleEndian.Uint32(header[0:4]))
-	compressed := wire.OpCode(binary.LittleEndian.Uint32(header[12:16])) == wire.OpCodeCompressed
+	length := int64(binary.LittleEndian.Uint32(prefix[0:4]))
+	compressed := wire.OpCode(binary.LittleEndian.Uint32(prefix[12:16])) == wire.OpCodeCompressed
 	if length > wire.MaxMsgLen || (length <= largeMessageThreshold && !compressed) {
 		h, body, err := wire.ReadMessage(r)
 		if err == nil {
@@ -68,19 +79,20 @@ func readMessage(r *bufio.Reader) (*wire.MsgHeader, wire.MsgBody, Compressor, er
 		return nil, nil, CompressorNone, err
 	}
 
-	message, compressor := buf.Bytes(), CompressorNone
+	message := buf.Bytes()
+	compressor = CompressorNone
 	if compressed {
 		if message, compressor, err = decompressMessage(message); err != nil {
 			return nil, nil, CompressorNone, err
 		}
 	}
-	h, body, err := wire.ReadMessage(bufio.NewReader(bytes.NewReader(message)))
+	h, msgBody, err := wire.ReadMessage(bufio.NewReader(bytes.NewReader(message)))
 	if err != nil {
-		return h, body, compressor, err
+		return h, msgBody, compressor, err
 	}
 	netstats.RecordRequest(int64(len(message)), length)
 	if compressor == CompressorSnappy {
 		netstats.RecordSnappyDecompression(length-wire.MsgHeaderLen-compressedPrefixLen, int64(len(message)-wire.MsgHeaderLen))
 	}
-	return h, body, compressor, nil
+	return h, msgBody, compressor, nil
 }

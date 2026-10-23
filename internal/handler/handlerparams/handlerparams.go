@@ -224,10 +224,11 @@ func GetBoolOptionalParam(key string, v any) (bool, error) {
 }
 
 // SplitNamespace returns the database and collection name from a given namespace in format "database.collection".
+// As in MongoDB it splits at the first dot, since collection names may contain dots.
 func SplitNamespace(ns, argument string) (string, string, error) {
-	parts := strings.Split(ns, ".")
+	db, collection, found := strings.Cut(ns, ".")
 
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+	if !found || db == "" || collection == "" {
 		return "", "", handlererrors.NewCommandErrorMsgWithArgument(
 			handlererrors.ErrInvalidNamespace,
 			fmt.Sprintf("Namespace %s is not a valid collection name", ns),
@@ -235,5 +236,5 @@ func SplitNamespace(ns, argument string) (string, string, error) {
 		)
 	}
 
-	return parts[0], parts[1], nil
+	return db, collection, nil
 }

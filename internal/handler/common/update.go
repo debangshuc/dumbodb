@@ -130,6 +130,12 @@ func UpdateDocument(ctx context.Context, c backends.Collection, cmd string, iter
 
 		if param.IsPipeline {
 			modified, err = processPipelineUpdate(doc, param.Pipeline)
+			// Like other errors applying an update, an expression error is a
+			// write error of update and a command error of findAndModify.
+			var cmdErr *handlererrors.CommandError
+			if errors.As(err, &cmdErr) {
+				err = NewUpdateError(cmdErr.Code(), cmdErr.Err().Error(), cmd)
+			}
 		} else if !param.HasUpdateOperators {
 			modified, err = processReplacementDoc(cmd, doc, param.Update)
 		} else {

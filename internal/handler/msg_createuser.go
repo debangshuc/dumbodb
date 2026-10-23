@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/FerretDB/wire"
 
@@ -210,11 +209,8 @@ func (h *Handler) MsgCreateUser(connCtx context.Context, msg *wire.OpMsg) (*wire
 			)
 		}
 
-		if strings.Contains(err.Error(), "prohibited character") {
-			return nil, handlererrors.NewCommandErrorMsg(
-				handlererrors.ErrStringProhibited,
-				"Error preflighting normalization: U_STRINGPREP_PROHIBITED_ERROR",
-			)
+		if prepErr, ok := saslprepCommandError(err); ok {
+			return nil, prepErr
 		}
 
 		return nil, lazyerrors.Error(err)
@@ -248,4 +244,14 @@ func parseCustomData(document *types.Document) (*types.Document, error) {
 	}
 
 	return cd, nil
+}
+
+// saslprepCommandError converts a password SASLprep rejected into the error
+// MongoDB returns for it.
+func saslprepCommandError(err error) (error, bool) {
+	var prepErr *password.SASLprepError
+	if !errors.As(err, &prepErr) {
+		return nil, false
+	}
+	return handlererrors.NewCommandErrorMsg(handlererrors.ErrStringProhibited, prepErr.Error()), true
 }

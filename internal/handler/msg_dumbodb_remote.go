@@ -115,14 +115,14 @@ func (h *Handler) MsgDumboDBRemote(connCtx context.Context, msg *wire.OpMsg) (*w
 	case "list":
 		arr := types.MakeArray(len(res.Remotes))
 		for _, r := range res.Remotes {
-			arr.Append(must.NotFail(types.NewDocument("name", r.Name, "url", r.URL)))
+			arr.Append(must.NotFail(types.NewDocument("name", r.Name, "url", backends.RedactURLCredentials(r.URL))))
 		}
 		return documentOpMsg(must.NotFail(types.NewDocument("remotes", arr, "ok", float64(1))))
 	case "add":
 		if len(res.Remotes) == 1 {
 			return documentOpMsg(must.NotFail(types.NewDocument(
 				"name", res.Remotes[0].Name,
-				"url", res.Remotes[0].URL,
+				"url", backends.RedactURLCredentials(res.Remotes[0].URL),
 				"ok", float64(1),
 			)))
 		}

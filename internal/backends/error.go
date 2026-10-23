@@ -32,6 +32,7 @@ const (
 
 	ErrorCodeDatabaseNameIsInvalid
 	ErrorCodeDatabaseDoesNotExist
+	ErrorCodeDatabaseDifferCase
 
 	ErrorCodeCollectionNameIsInvalid
 	ErrorCodeCollectionDoesNotExist
@@ -60,6 +61,11 @@ type Error struct {
 	// dupIndex is "" and dupKey is nil for other errors.
 	dupIndex string
 	dupKey   *types.Document
+
+	// existingDB and requestedDB name the databases of an
+	// ErrorCodeDatabaseDifferCase error; both are "" for other errors.
+	existingDB  string
+	requestedDB string
 }
 
 // NewError creates a new backend error.
@@ -85,6 +91,23 @@ func NewDuplicateKeyError(index string, key *types.Document) *Error {
 		dupIndex: index,
 		dupKey:   key,
 	}
+}
+
+// NewDatabaseDifferCaseError creates an ErrorCodeDatabaseDifferCase for a
+// requested database name that differs only in case from an existing one.
+func NewDatabaseDifferCaseError(existing, requested string) *Error {
+	return &Error{
+		code:        ErrorCodeDatabaseDifferCase,
+		err:         fmt.Errorf("database %q differs only in case from %q", requested, existing),
+		existingDB:  existing,
+		requestedDB: requested,
+	}
+}
+
+// DifferCaseNames returns the existing and requested database names of an
+// ErrorCodeDatabaseDifferCase error.
+func (err *Error) DifferCaseNames() (existing, requested string) {
+	return err.existingDB, err.requestedDB
 }
 
 func (err *Error) Code() ErrorCode {

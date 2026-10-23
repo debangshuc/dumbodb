@@ -73,26 +73,9 @@ func newReplaceWith(stage *types.Document) (aggregations.Stage, error) {
 }
 
 func (r *replaceRoot) Process(_ context.Context, iter types.DocumentsIterator, closer *iterator.MultiCloser) (types.DocumentsIterator, error) { //nolint:lll // for readability
-	docs, err := iterator.ConsumeValues(iter)
-	if err != nil {
-		return nil, lazyerrors.Error(err)
-	}
-
-	out := make([]*types.Document, 0, len(docs))
-
-	for _, doc := range docs {
-		replacement, evalErr := evaluateReplaceExpression(r.newRoot, doc)
-		if evalErr != nil {
-			return nil, evalErr
-		}
-
-		out = append(out, replacement)
-	}
-
-	result := iterator.Values(iterator.ForSlice(out))
-	closer.Add(result)
-
-	return result, nil
+	return newMapIterator(iter, closer, func(doc *types.Document) (*types.Document, error) {
+		return evaluateReplaceExpression(r.newRoot, doc)
+	}), nil
 }
 
 // evaluateReplaceExpression evaluates a newRoot expression against a document.
@@ -112,7 +95,7 @@ func evaluateReplaceExpression(expr any, doc *types.Document) (*types.Document, 
 		result, ok := val.(*types.Document)
 		if !ok {
 			return nil, handlererrors.NewCommandErrorMsgWithArgument(
-				handlererrors.ErrOperationFailed,
+				handlererrors.ErrReplaceRootNotObject,
 				fmt.Sprintf(
 					"'newRoot' expression for $replaceRoot must evaluate to an object, got %s",
 					types.FormatAnyValue(val),
@@ -157,7 +140,7 @@ func evaluateReplaceExpression(expr any, doc *types.Document) (*types.Document, 
 			result, ok := val.(*types.Document)
 			if !ok {
 				return nil, handlererrors.NewCommandErrorMsgWithArgument(
-					handlererrors.ErrOperationFailed,
+					handlererrors.ErrReplaceRootNotObject,
 					fmt.Sprintf(
 						"'newRoot' expression for $replaceRoot must evaluate to an object, got %s",
 						types.FormatAnyValue(val),
@@ -174,7 +157,7 @@ func evaluateReplaceExpression(expr any, doc *types.Document) (*types.Document, 
 
 	default:
 		return nil, handlererrors.NewCommandErrorMsgWithArgument(
-			handlererrors.ErrOperationFailed,
+			handlererrors.ErrReplaceRootNotObject,
 			fmt.Sprintf(
 				"'newRoot' expression for $replaceRoot must evaluate to an object, got %s",
 				types.FormatAnyValue(expr),

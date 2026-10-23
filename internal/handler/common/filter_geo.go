@@ -23,7 +23,6 @@ import (
 	"github.com/dolthub/dumbodb/internal/handler/handlererrors"
 	"github.com/dolthub/dumbodb/internal/types"
 	"github.com/dolthub/dumbodb/internal/util/iterator"
-	"github.com/dolthub/dumbodb/internal/util/lazyerrors"
 	"github.com/dolthub/dumbodb/internal/util/must"
 )
 
@@ -203,11 +202,12 @@ func ValidateGeoFilter(filter *types.Document) error {
 
 // GeoDistanceSortIterator consumes the iterator, computes the distance from the
 // geo query point to each document's geometry field, sorts ascending by distance,
-// and returns a new iterator over the sorted slice.
+// and returns a new iterator over the sorted slice. Without an index to read in
+// distance order this is a blocking sort, limited like $sort.
 func GeoDistanceSortIterator(iter types.DocumentsIterator, closer *iterator.MultiCloser, gsk *GeoSortKey) (types.DocumentsIterator, error) {
-	docs, err := iterator.ConsumeValues(iter)
+	docs, err := ConsumeDocuments(iter, "$near")
 	if err != nil {
-		return nil, lazyerrors.Error(err)
+		return nil, err
 	}
 
 	type docDist struct {

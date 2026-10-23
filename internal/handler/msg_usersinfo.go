@@ -277,6 +277,9 @@ func (p *usersInfoPair) extract(v any, dbName string) error {
 					fmt.Sprintf("UserName must contain a string field named: db. But, has type %T", db),
 				)
 			}
+			if err = common.ValidateDatabaseName(p.db); err != nil {
+				return err
+			}
 		}
 
 		return nil

@@ -81,7 +81,7 @@ func (h *Handler) MsgDumboDBClone(connCtx context.Context, msg *wire.OpMsg) (*wi
 
 	return documentOpMsg(must.NotFail(types.NewDocument(
 		"db", res.DB,
-		"from", res.URL,
+		"from", backends.RedactURLCredentials(res.URL),
 		"ok", float64(1),
 	)))
 }
