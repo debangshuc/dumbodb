@@ -138,11 +138,11 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 				return &backends.QueryResult{Iter: plan.sortedIter(ctx, state, m, params.Sort, reverse), Sorted: true}, nil
 			}
 			if fieldSort {
-				iter, ok, err := c.trySortWalkTrial(ctx, state, m, params, plan)
+				iter, outcome, err := c.trySortWalkTrial(ctx, state, m, params, plan)
 				if err != nil {
 					return nil, err
 				}
-				if ok {
+				if outcome == trialWalkWon {
 					return &backends.QueryResult{Iter: iter, Sorted: true}, nil
 				}
 			}

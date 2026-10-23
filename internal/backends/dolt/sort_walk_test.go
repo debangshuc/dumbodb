@@ -207,7 +207,15 @@ func TestSortWalkDeclines(t *testing.T) {
 // and q = i, indexed on each field.
 func newSortVsFilterCollection(t *testing.T, n int32) backends.Collection {
 	t.Helper()
-	c := newSortWalkCollection(t, backends.IndexInfo{Name: "k", Key: []backends.IndexKeyPair{{Field: "k"}}})
+	_, c := newSortVsFilterBackend(t, n)
+	return c
+}
+
+// newSortVsFilterBackend holds idxdb.tests: n documents with k a permutation
+// of 0..n-1 (index k), p = _id % 3 (index p), and q = _id (index q).
+func newSortVsFilterBackend(t *testing.T, n int32) (*Backend, backends.Collection) {
+	t.Helper()
+	b, c := newDottedPathTestBackend(t, backends.IndexInfo{Name: "k", Key: []backends.IndexKeyPair{{Field: "k"}}})
 	var docs []*types.Document
 	for i := int32(1); i <= n; i++ {
 		docs = append(docs, must.NotFail(types.NewDocument("_id", i, "k", (i*7)%n, "p", i%3, "q", i)))
@@ -221,7 +229,7 @@ func newSortVsFilterCollection(t *testing.T, n int32) backends.Collection {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	return c
+	return b, c
 }
 
 func TestSortWalkTrialAgainstFilterIndex(t *testing.T) {
@@ -257,6 +265,47 @@ func TestSortWalkTrialAgainstFilterIndex(t *testing.T) {
 				if prev, cur := (ids[i-1]*7)%3000, (ids[i]*7)%3000; ids[i-1] != 0 && prev > cur {
 					t.Fatalf("walk out of k order at %d: %v", i, ids[:i+1])
 				}
+			}
+		})
+	}
+}
+
+func TestSortWalkTrialOutcome(t *testing.T) {
+	b, _ := newSortVsFilterBackend(t, 3000)
+	c := rawCollection(b, "idxdb", "tests")
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		filter *types.Document
+		limit  int64
+		want   trialOutcome
+	}{
+		{"unselective filter: walk wins", must.NotFail(types.NewDocument("p", int32(1))), 5, trialWalkWon},
+		{"moderate filter: filter wins", must.NotFail(types.NewDocument("q", must.NotFail(types.NewDocument("$lt", int32(300))))), 0, trialFilterWon},
+		{"filter fits the limit: not run", must.NotFail(types.NewDocument("q", int32(7))), 5, trialNotRun},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			params := &backends.QueryParams{Filter: tc.filter, Sort: sortOn("k", 1), LimitHint: tc.limit}
+			primary, _, state, err := c.getMap(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := c.planIndexLookup(ctx, state, primary, params.Filter, nil, nil, false)
+			if err != nil || plan == nil {
+				t.Fatalf("planIndexLookup = %v, %v", plan, err)
+			}
+			iter, got, err := c.trySortWalkTrial(ctx, state, primary, params, plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if iter != nil {
+				iter.Close()
+			}
+			if got != tc.want {
+				t.Fatalf("outcome = %d, want %d", got, tc.want)
+			}
+			if (iter != nil) != (got == trialWalkWon) {
+				t.Fatalf("iterator returned = %v for outcome %d", iter != nil, got)
 			}
 		})
 	}

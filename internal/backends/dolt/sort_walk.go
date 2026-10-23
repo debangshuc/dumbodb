@@ -142,8 +142,8 @@ func (c *collection) sortWalkWinsTrial(ctx context.Context, params *backends.Que
 	if err != nil || plan == nil {
 		return "", false
 	}
-	iter, ok, err := c.trySortWalkTrial(ctx, state, primary, params, plan)
-	if err != nil || !ok {
+	iter, outcome, err := c.trySortWalkTrial(ctx, state, primary, params, plan)
+	if err != nil || outcome != trialWalkWon {
 		return "", false
 	}
 	iter.Close()
@@ -154,30 +154,41 @@ func (c *collection) sortWalkWinsTrial(ctx context.Context, params *backends.Que
 // its trial period.
 const trialMaxResults = 101
 
+// trialOutcome is what a sort-walk trial decided.
+type trialOutcome int
+
+const (
+	// trialNotRun: no competing walk, or the filter plan fits the target.
+	trialNotRun trialOutcome = iota
+	trialFilterWon
+	trialWalkWon
+)
+
 // trySortWalkTrial races the sort walk against plan, a filter served by a
 // different index, the way MongoDB's multi-planner trial does: plan finishes
 // after scanning its keys and then emitting its sorted documents up to the
 // trial target, while the walk examines one document per step, filtering as
 // it goes. The walk wins when it reaches the target, or its end, first; the
-// documents it examined are replayed ahead of the rest of the walk.
-func (c *collection) trySortWalkTrial(ctx context.Context, state *dbState, primary prolly.Map, params *backends.QueryParams, plan *indexLookupPlan) (*replayIter, bool, error) {
+// documents it examined are replayed ahead of the rest of the walk, returned
+// with trialWalkWon.
+func (c *collection) trySortWalkTrial(ctx context.Context, state *dbState, primary prolly.Map, params *backends.QueryParams, plan *indexLookupPlan) (*replayIter, trialOutcome, error) {
 	if params.Hint != nil {
-		return nil, false, nil
+		return nil, trialNotRun, nil
 	}
 	target := trialTarget(params)
 	// A filter plan holding no more documents than the target already costs
 	// at most its keys plus an in-memory sort of target documents, so the
 	// trial cannot pay for itself.
 	if len(plan.ids) <= target {
-		return nil, false, nil
+		return nil, trialNotRun, nil
 	}
 	walk, ok, err := c.trySortWalk(ctx, state, primary, params)
 	if err != nil || !ok {
-		return nil, false, err
+		return nil, trialNotRun, err
 	}
 	if walk.index == plan.index {
 		walk.Close()
-		return nil, false, nil
+		return nil, trialNotRun, nil
 	}
 
 	planSteps := plan.keys + 1 + min(len(plan.ids), target)
@@ -187,26 +198,26 @@ func (c *collection) trySortWalkTrial(ctx context.Context, state *dbState, prima
 	for len(examined)+1 < planSteps {
 		_, doc, err := walk.Next()
 		if errors.Is(err, iterator.ErrIteratorDone) {
-			return &replayIter{docs: examined, rest: walk}, true, nil
+			return &replayIter{docs: examined, rest: walk}, trialWalkWon, nil
 		}
 		if err != nil {
 			walk.Close()
-			return nil, false, err
+			return nil, trialNotRun, err
 		}
 		examined = append(examined, doc)
 		match, err := backends.MatchPartialFilter(doc, params.Filter)
 		if err != nil {
 			walk.Close()
-			return nil, false, nil
+			return nil, trialNotRun, nil
 		}
 		if match {
 			if matched++; matched == target {
-				return &replayIter{docs: examined, rest: walk}, true, nil
+				return &replayIter{docs: examined, rest: walk}, trialWalkWon, nil
 			}
 		}
 	}
 	walk.Close()
-	return nil, false, nil
+	return nil, trialFilterWon, nil
 }
 
 // replayIter yields docs, then the rest of the iterator they were read from.
