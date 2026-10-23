@@ -121,6 +121,65 @@ func TestSortWalkMergesArrayKeys(t *testing.T) {
 	}
 }
 
+func TestSortWalkReadsArrayKeysLazily(t *testing.T) {
+	arr := func(v ...any) *types.Array { return must.NotFail(types.NewArray(v...)) }
+	var docs []*types.Document
+	for i := int32(1); i <= 300; i++ {
+		switch i % 30 {
+		case 0:
+			docs = append(docs, kDoc(i, arr()))
+		case 1:
+			docs = append(docs, kDoc(i, arr(arr(i))))
+		default:
+			docs = append(docs, kDoc(i, i))
+		}
+	}
+	c := newSortWalkCollection(t, backends.IndexInfo{Name: "k", Key: []backends.IndexKeyPair{{Field: "k"}}}, docs...)
+
+	first := func(sort *types.Document, n int) []int32 {
+		t.Helper()
+		res, err := c.Query(context.Background(), &backends.QueryParams{Sort: sort})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Iter.Close()
+		if !res.Sorted {
+			t.Fatal("multikey index holding array keys must be walked")
+		}
+		var ids []int32
+		for len(ids) < n {
+			_, doc, err := res.Iter.Next()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, must.NotFail(doc.Get("_id")).(int32))
+		}
+		return ids
+	}
+
+	keys, read := queryExecutorCounters.keys.Load(), queryExecutorCounters.docs.Load()
+	ids := first(sortOn("k", 1), 3)
+	gotKeys, gotDocs := queryExecutorCounters.keys.Load()-keys, queryExecutorCounters.docs.Load()-read
+	for _, id := range ids {
+		if id%30 != 0 {
+			t.Fatalf("ascending = %v, want empty arrays (ids divisible by 30) first", ids)
+		}
+	}
+	if gotKeys > 4 || gotDocs > 3 {
+		t.Fatalf("first 3 of an ascending walk examined %d keys, %d docs; want at most 4, 3", gotKeys, gotDocs)
+	}
+
+	keys, read = queryExecutorCounters.keys.Load(), queryExecutorCounters.docs.Load()
+	ids = first(sortOn("k", -1), 3)
+	gotKeys, gotDocs = queryExecutorCounters.keys.Load()-keys, queryExecutorCounters.docs.Load()-read
+	if want := []int32{271, 241, 211}; !slices.Equal(ids, want) {
+		t.Fatalf("descending = %v, want nested arrays first by value %v", ids, want)
+	}
+	if gotKeys > 11 || gotDocs > 10 {
+		t.Fatalf("first 3 of a descending walk examined %d keys, %d docs; want only the nested-array group (10) plus one", gotKeys, gotDocs)
+	}
+}
+
 func TestSortWalkDeclines(t *testing.T) {
 	k := []backends.IndexKeyPair{{Field: "k"}}
 	for _, tc := range []struct {

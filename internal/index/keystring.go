@@ -63,6 +63,7 @@ import (
 )
 
 const (
+	ctypeUndefined = byte(0x0C) // a top-level empty array's key; sorts below every value
 	ctypeMinKey    = byte(0x10)
 	ctypeNull      = byte(0x14)
 	ctypeNaN       = byte(0x19) // sorts below every other number
@@ -158,6 +159,9 @@ func EncodeValue(v any) []byte {
 	case *types.Array:
 		return []byte{ctypeArray}
 
+	case types.UndefinedType:
+		return []byte{ctypeUndefined}
+
 	case types.MaxKeyType:
 		return []byte{ctypeMaxKey}
 
@@ -182,7 +186,7 @@ func EncodeValueLossy(v any) bool {
 	case nil, types.NullType, bool, int32, int64, float64, string, PreEncoded,
 		types.ObjectID, time.Time, types.Binary, types.Timestamp,
 		types.Regex, *types.Document, *types.Array,
-		types.MaxKeyType, types.MinKeyType:
+		types.MaxKeyType, types.MinKeyType, types.UndefinedType:
 		return false
 	}
 	// Decimal128 and anything else without a case in EncodeValue.
@@ -426,7 +430,7 @@ func valueEncodingLengths(b []byte) []int {
 		return nil
 	}
 	switch c := b[0]; {
-	case c == ctypeMinKey, c == ctypeNull, c == ctypeNaN, c == ctypeNegInf, c == ctypeZero, c == ctypePosInf,
+	case c == ctypeUndefined, c == ctypeMinKey, c == ctypeNull, c == ctypeNaN, c == ctypeNegInf, c == ctypeZero, c == ctypePosInf,
 		c == ctypeObject, c == ctypeArray, c == ctypeBoolFalse, c == ctypeBoolTrue, c == ctypeMaxKey:
 		return []int{1}
 	case c >= ctypeNegInf+1 && c <= ctypeNegMedium:

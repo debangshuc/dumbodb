@@ -3477,9 +3477,12 @@ func expandMultiKeyValues(fieldVals []any) [][]any {
 			continue
 		}
 		if arr.Len() == 0 {
-			// Empty array: index the array itself (matches MongoDB behavior
-			// for queries like {field: {$size: 0}}).
-			return [][]any{fieldVals}
+			// Like MongoDB, index an empty array as undefined, which sorts
+			// below every value as the empty array does.
+			row := make([]any, len(fieldVals))
+			copy(row, fieldVals)
+			row[i] = types.Undefined
+			return [][]any{row}
 		}
 		expanded := make([][]any, arr.Len())
 		for j := 0; j < arr.Len(); j++ {

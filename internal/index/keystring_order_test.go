@@ -34,6 +34,7 @@ func TestKeyStringTypeBracketOrder(t *testing.T) {
 		name string
 		v    any
 	}{
+		{"undefined (a top-level empty array)", types.Undefined},
 		{"MinKey", types.MinKey},
 		{"Null", types.Null},
 		{"NaN", math.NaN()},

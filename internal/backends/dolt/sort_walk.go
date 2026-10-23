@@ -119,9 +119,6 @@ func (c *collection) trySortWalk(ctx context.Context, state *dbState, primary pr
 	}
 	if idx.Multikey {
 		it.seen = make(map[string]struct{})
-		if err := it.loadArrayKeyDocs(idxMap); err != nil {
-			return nil, false, err
-		}
 	}
 	if state.backend != nil && state.backend.backgroundRP != nil {
 		releasePrimary := state.backend.backgroundRP.pinRoot(state.name, primary.HashOf())
@@ -243,45 +240,21 @@ type sortWalkEntry struct {
 // marker in the index, so a marker group is read whole and ordered by value.
 // For a multikey index a document is yielded at its first entry, which in an
 // ascending walk is its minimum key and in a descending walk its maximum, the
-// value MongoDB sorts it by. Documents holding an array key (an empty or
-// nested array) are read up front and merged in by sort value, since one
-// array marker covers every array and an empty array sorts below all values.
+// value MongoDB sorts it by. Empty arrays have their own marker below every
+// value; nested arrays share one marker group, ordered by value like
+// subdocuments.
 type sortWalkIter struct {
-	index     string
-	ctx       context.Context
-	ns        tree.NodeStore
-	primary   prolly.Map
-	entries   prolly.MapIter
-	path      types.Path
-	order     types.SortType
-	seen      map[string]struct{}
-	peeked    *sortWalkEntry
-	pending   []*types.Document
-	arrayDocs []*types.Document
-	walked    *types.Document
-	walkDone  bool
-	release   func()
-}
-
-// loadArrayKeyDocs reads the documents holding an array key, ordered by sort
-// value, and marks them seen so the walk skips their other entries.
-func (it *sortWalkIter) loadArrayKeyDocs(idxMap prolly.Map) error {
-	ids, err := idxpkg.ArrayKeyIDs(it.ctx, idxMap)
-	if err != nil {
-		return err
-	}
-	countKeysExamined(len(ids))
-	for _, id := range ids {
-		doc, err := it.fetch(&sortWalkEntry{id: id})
-		if err != nil {
-			return err
-		}
-		if doc != nil {
-			it.arrayDocs = append(it.arrayDocs, doc)
-		}
-	}
-	it.sortByValue(it.arrayDocs)
-	return nil
+	index   string
+	ctx     context.Context
+	ns      tree.NodeStore
+	primary prolly.Map
+	entries prolly.MapIter
+	path    types.Path
+	order   types.SortType
+	seen    map[string]struct{}
+	peeked  *sortWalkEntry
+	pending []*types.Document
+	release func()
 }
 
 func (it *sortWalkIter) sortsBefore(a, b *types.Document) bool {
@@ -339,23 +312,13 @@ func (it *sortWalkIter) fetch(e *sortWalkEntry) (*types.Document, error) {
 }
 
 func (it *sortWalkIter) Next() (struct{}, *types.Document, error) {
-	if it.walked == nil && !it.walkDone {
-		doc, err := it.nextWalked()
-		if err != nil {
-			return struct{}{}, nil, err
-		}
-		it.walked, it.walkDone = doc, doc == nil
+	doc, err := it.nextWalked()
+	if err != nil {
+		return struct{}{}, nil, err
 	}
-	if len(it.arrayDocs) > 0 && (it.walked == nil || it.sortsBefore(it.arrayDocs[0], it.walked)) {
-		doc := it.arrayDocs[0]
-		it.arrayDocs = it.arrayDocs[1:]
-		return struct{}{}, doc, nil
-	}
-	if it.walked == nil {
+	if doc == nil {
 		return struct{}{}, nil, iterator.ErrIteratorDone
 	}
-	doc := it.walked
-	it.walked = nil
 	return struct{}{}, doc, nil
 }
 
@@ -372,10 +335,6 @@ func (it *sortWalkIter) nextWalked() (*types.Document, error) {
 		if err != nil || e == nil {
 			return nil, err
 		}
-		if idxpkg.LeadingKeyIsArray(e.prefix) && it.seen != nil {
-			continue
-		}
-
 		if !idxpkg.LeadingKeyMergesValues(e.prefix) {
 			doc, err := it.fetch(e)
 			if err != nil {

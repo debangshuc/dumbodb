@@ -314,14 +314,3 @@ func ValDescriptor() *val.TupleDesc {
 	return idxValDesc
 }
 
-// ArrayKeyIDs returns the primary ids of entries whose leading value is an
-// array, which a multikey index stores for an empty or nested array. An id
-// appears once per such entry.
-func ArrayKeyIDs(ctx context.Context, m prolly.Map) ([][]byte, error) {
-	return RangeLookup(ctx, m, []byte{ctypeArray}, []byte{ctypeArray + 1})
-}
-
-// LeadingKeyIsArray reports whether key's leading value is the array marker.
-func LeadingKeyIsArray(key []byte) bool {
-	return len(key) > 0 && key[0] == ctypeArray
-}
