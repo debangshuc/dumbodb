@@ -106,17 +106,59 @@ EOF
 RUN chmod 755 /usr/local/bin/fetch-dumbodb.sh && /usr/local/bin/fetch-dumbodb.sh
 
 
+# Fetches MongoDB's apt signing key for the mongosh package and keeps only
+# the key with the pinned fingerprint, as the official mongo image does. Only
+# the keyring file reaches the runtime image, not curl or gnupg.
+FROM base AS mongodb-keyring
+ARG MONGODB_KEY_URL=https://pgp.mongodb.com/server-8.0.asc
+ARG MONGODB_KEY_FINGERPRINT=4B0752C1BCA238C0B4EE14DC41DE058A4E7DCA05
+ARG MONGODB_KEYRING=/etc/apt/keyrings/mongodb.asc
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends curl gnupg && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY <<'EOF' /usr/local/bin/fetch-mongodb-keyring.sh
+#!/bin/sh
+set -eu
+
+GNUPGHOME=$(mktemp -d)
+export GNUPGHOME
+
+curl -fsSL -o "$GNUPGHOME/KEYS" "$MONGODB_KEY_URL"
+gpg --batch --quiet --import "$GNUPGHOME/KEYS"
+mkdir -p "$(dirname "$MONGODB_KEYRING")"
+gpg --batch --export --armor "$MONGODB_KEY_FINGERPRINT" > "$MONGODB_KEYRING"
+rm -rf "$GNUPGHOME"
+
+if [ ! -s "$MONGODB_KEYRING" ]; then
+	echo "$MONGODB_KEY_URL has no key with fingerprint $MONGODB_KEY_FINGERPRINT" >&2
+	exit 1
+fi
+EOF
+RUN chmod 755 /usr/local/bin/fetch-mongodb-keyring.sh && /usr/local/bin/fetch-mongodb-keyring.sh
+
+
 FROM base AS runtime
 ARG DUMBODB_VERSION
+# mongosh, as in the official mongo image: used through docker exec (including
+# the --auth localhost-exception bootstrap), to create the root user and to run
+# /docker-entrypoint-initdb.d scripts.
+ARG MONGOSH_VERSION=2.13.0
+
+COPY --from=mongodb-keyring /etc/apt/keyrings/mongodb.asc /etc/apt/keyrings/mongodb.asc
 
 # dumbodb is dynamically linked against ICU (libicui18n / libicuuc /
 # libicudata) via the transitive go-icu-regex CGo binding. Install the
 # runtime-only ICU package unconditionally -- the download-binary path
 # needs it just as much as the source-build path. libicu74 is the
-# matching version on ubuntu:24.04.
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends libicu74 && \
-    rm -rf /var/lib/apt/lists/*
+# matching version on ubuntu:24.04. apt verifies mongosh against the pinned
+# MongoDB key.
+RUN echo "deb [ signed-by=/etc/apt/keyrings/mongodb.asc ] https://repo.mongodb.org/apt/ubuntu noble/mongodb-org/8.0 multiverse" \
+        > /etc/apt/sources.list.d/mongodb-org.list && \
+    apt-get update -y && \
+    apt-get install -y --no-install-recommends libicu74 "mongodb-mongosh=${MONGOSH_VERSION}" && \
+    rm -rf /var/lib/apt/lists/* && \
+    mongosh --version
 
 # Only one binary is possible due to DUMBODB_VERSION, so we optionally copy from either stage
 COPY --from=download-binary /usr/local/bin/dumbodb* /usr/local/bin/
