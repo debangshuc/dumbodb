@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 package tests
 
 import (
@@ -80,15 +79,15 @@ func runDockerEntrypoint(t *testing.T, uid string, args ...string) []string {
 
 func TestDockerImageRunsServerAsNonRoot(t *testing.T) {
 	t.Run("RootStartFixesOwnershipThenDropsToDumbodb", func(t *testing.T) {
-		calls := runDockerEntrypoint(t, "0", "--data-dir", "/var/lib/dumbodb")
+		calls := runDockerEntrypoint(t, "0", "dumbodb")
 		require.Equal(t, "find -L /var/lib/dumbodb ! -user dumbodb -exec chown dumbodb:dumbodb {} +", calls[0])
 		require.True(t, strings.HasPrefix(calls[len(calls)-2], "setpriv --reuid=dumbodb --regid=dumbodb --init-groups "), calls[len(calls)-2])
-		require.Equal(t, "dumbodb uid=999 --data-dir /var/lib/dumbodb", calls[len(calls)-1])
+		require.Equal(t, "dumbodb uid=999 --addr 0.0.0.0:27017 --data-dir /var/lib/dumbodb", calls[len(calls)-1])
 	})
 
 	t.Run("NonRootStartRunsServerDirectly", func(t *testing.T) {
 		calls := runDockerEntrypoint(t, "1234", "--auth")
-		require.Equal(t, []string{"dumbodb uid=1234 --auth"}, calls)
+		require.Equal(t, []string{"dumbodb uid=1234 --auth --addr 0.0.0.0:27017 --data-dir /var/lib/dumbodb"}, calls)
 	})
 
 	t.Run("OtherCommandsRunUnchanged", func(t *testing.T) {
@@ -99,8 +98,44 @@ func TestDockerImageRunsServerAsNonRoot(t *testing.T) {
 	t.Run("DockerfileUsesEntrypoint", func(t *testing.T) {
 		dockerfile, err := os.ReadFile(filepath.Join("..", "docker", "Dockerfile"))
 		require.NoError(t, err)
+		require.Contains(t, string(dockerfile), `CMD ["dumbodb"]`, "the entrypoint supplies the default flags, as mongo's image does")
+	})
+
+	t.Run("DockerfileStillCreatesUser", func(t *testing.T) {
+		dockerfile, err := os.ReadFile(filepath.Join("..", "docker", "Dockerfile"))
+		require.NoError(t, err)
 		require.Contains(t, string(dockerfile), `ENTRYPOINT ["tini", "--", "/usr/local/bin/docker-entrypoint.sh"]`)
 		require.Contains(t, string(dockerfile), "useradd --uid 999 --system --gid dumbodb")
 		require.NotContains(t, string(dockerfile), "\nUSER ", "the entrypoint must start as root to fix data directory ownership")
 	})
+}
+
+// Passing any flags replaces the image's CMD, so "docker run dumbodb --auth"
+// used to start a server on 127.0.0.1 inside the container (unreachable
+// through -p) with a data directory that did not exist. As the mongo image
+// adds --bind_ip_all, the entrypoint adds the listen address and data volume
+// unless the command line sets them.
+func TestDockerEntrypointAddsDefaultFlags(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args []string
+		want string
+	}{
+		"NoFlags":           {nil, "dumbodb uid=1234 --addr 0.0.0.0:27017 --data-dir /var/lib/dumbodb"},
+		"AuthOnly":          {[]string{"--auth"}, "dumbodb uid=1234 --auth --addr 0.0.0.0:27017 --data-dir /var/lib/dumbodb"},
+		"PortOnly":          {[]string{"--port", "28000"}, "dumbodb uid=1234 --port 28000 --addr 0.0.0.0:27017 --data-dir /var/lib/dumbodb"},
+		"AddrGiven":         {[]string{"--addr", "127.0.0.1:1"}, "dumbodb uid=1234 --addr 127.0.0.1:1 --data-dir /var/lib/dumbodb"},
+		"AddrGivenEquals":   {[]string{"-addr=127.0.0.1:1"}, "dumbodb uid=1234 -addr=127.0.0.1:1 --data-dir /var/lib/dumbodb"},
+		"DataDirGiven":      {[]string{"-data-dir", "/x"}, "dumbodb uid=1234 -data-dir /x --addr 0.0.0.0:27017"},
+		"DataDirGivenEqual": {[]string{"--data-dir=/x"}, "dumbodb uid=1234 --data-dir=/x --addr 0.0.0.0:27017"},
+		"BothGiven":         {[]string{"--addr", "0.0.0.0:1", "--data-dir", "/x"}, "dumbodb uid=1234 --addr 0.0.0.0:1 --data-dir /x"},
+		"SimilarFlagName":   {[]string{"--pprof-addr", "127.0.0.1:6060"}, "dumbodb uid=1234 --pprof-addr 127.0.0.1:6060 --addr 0.0.0.0:27017 --data-dir /var/lib/dumbodb"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			args := append([]string{"dumbodb"}, tc.args...)
+			if len(tc.args) > 0 {
+				args = tc.args
+			}
+			require.Equal(t, []string{tc.want}, runDockerEntrypoint(t, "1234", args...))
+		})
+	}
 }

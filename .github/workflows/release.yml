@@ -243,9 +243,16 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # The Docker image verifies the binary it downloads against these.
+      - name: Write checksums
+        working-directory: dist
+        run: sha256sum dumbodb-* > SHA256SUMS
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
-          files: dist/dumbodb-*
+          files: |
+            dist/dumbodb-*
+            dist/SHA256SUMS
           generate_release_notes: true
