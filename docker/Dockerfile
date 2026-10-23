@@ -173,7 +173,7 @@ RUN /usr/local/bin/dumbodb --version
 # server. A container started with --user skips that step.
 RUN groupadd --gid 999 --system dumbodb && \
     useradd --uid 999 --system --gid dumbodb --home-dir /var/lib/dumbodb dumbodb && \
-    mkdir -p /var/lib/dumbodb && \
+    mkdir -p /var/lib/dumbodb /docker-entrypoint-initdb.d && \
     chown dumbodb:dumbodb /var/lib/dumbodb && \
     chmod 700 /var/lib/dumbodb
 
@@ -277,9 +277,21 @@ is_fresh() {
 	return 0
 }
 
+# has_init_scripts reports whether /docker-entrypoint-initdb.d holds scripts
+# to run; only *.sh and *.js files count.
+has_init_scripts() {
+	local f
+	for f in /docker-entrypoint-initdb.d/*; do
+		case "$f" in
+		*.sh | *.js) return 0 ;;
+		esac
+	done
+	return 1
+}
+
 # initialize ARGS... starts a temporary server on 127.0.0.1 with the server's
 # arguments, minus authentication, replication and listen settings, creates
-# the root user and stops it.
+# the root user if one is configured, runs the init scripts and stops it.
 initialize() {
 	local temp_args=() skip='' tls_cert='' arg pid tries
 	shift
@@ -332,13 +344,36 @@ initialize() {
 		exit 1
 	fi
 
-	# The credentials reach mongosh through its environment, never as code.
-	INITDB_ROOT_USERNAME=$root_user INITDB_ROOT_PASSWORD=$root_password "${mongo[@]}" admin --eval '
-		db.createUser({
-			user: process.env.INITDB_ROOT_USERNAME,
-			pwd: process.env.INITDB_ROOT_PASSWORD,
-			roles: [{role: "root", db: "admin"}],
-		})' > /dev/null
+	if [ -n "$root_user" ]; then
+		# The credentials reach mongosh through its environment, never as code.
+		INITDB_ROOT_USERNAME=$root_user INITDB_ROOT_PASSWORD=$root_password "${mongo[@]}" admin --eval '
+			db.createUser({
+				user: process.env.INITDB_ROOT_USERNAME,
+				pwd: process.env.INITDB_ROOT_PASSWORD,
+				roles: [{role: "root", db: "admin"}],
+			})' > /dev/null
+	fi
+
+	# As in the mongo image: *.sh scripts are sourced (and can use the mongo
+	# array), *.js scripts run against MONGO_INITDB_DATABASE.
+	export MONGO_INITDB_DATABASE=$init_database
+	local f
+	for f in /docker-entrypoint-initdb.d/*; do
+		case "$f" in
+		*.sh)
+			echo >&2 "$0: running $f"
+			# shellcheck disable=SC1090
+			. "$f"
+			;;
+		*.js)
+			echo >&2 "$0: running $f"
+			"${mongo[@]}" "$MONGO_INITDB_DATABASE" "$f"
+			;;
+		*)
+			[ -e "$f" ] && echo >&2 "$0: ignoring $f"
+			;;
+		esac
+	done
 
 	kill -TERM "$pid"
 	wait "$pid" || :
@@ -347,6 +382,8 @@ initialize() {
 if [ "${1:-}" = 'dumbodb' ]; then
 	root_user=$(init_var ROOT_USERNAME)
 	root_password=$(init_var ROOT_PASSWORD)
+	init_database=$(init_var DATABASE)
+	init_database=${init_database:-test}
 	if [ -n "$root_user" ] || [ -n "$root_password" ]; then
 		if [ -z "$root_user" ] || [ -z "$root_password" ]; then
 			echo >&2 "error: missing 'MONGO_INITDB_ROOT_USERNAME' or 'MONGO_INITDB_ROOT_PASSWORD'"
@@ -355,9 +392,9 @@ if [ "${1:-}" = 'dumbodb' ]; then
 			exit 1
 		fi
 		has_flag auth "$@" || set -- "$@" --auth
-		if is_fresh "$(flag_value data-dir "$@")"; then
-			initialize "$@"
-		fi
+	fi
+	if { [ -n "$root_user" ] || has_init_scripts; } && is_fresh "$(flag_value data-dir "$@")"; then
+		initialize "$@"
 	fi
 	unset "${!MONGO_INITDB_@}" "${!DUMBO_INITDB_@}"
 fi

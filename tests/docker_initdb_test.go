@@ -44,6 +44,7 @@ echo "dumbodb $*" >> "$STUB_LOG"
 echo "dumbodb-env$(env | grep -o '^[A-Z_]*INITDB[A-Z_]*' | sort | sed 's/^/ /' | tr -d '\n')" >> "$STUB_LOG"`,
 	"mongosh": `case "$*" in
 *createUser*) echo "mongosh createUser user=$INITDB_ROOT_USERNAME pass=$INITDB_ROOT_PASSWORD" >> "$STUB_LOG" ;;
+*.js) for a; do db=$file; file=$a; done; echo "mongosh-js $db ${file##*/}" >> "$STUB_LOG" ;;
 esac
 exit 0`,
 }
@@ -51,6 +52,22 @@ exit 0`,
 // runDockerInit runs the image entrypoint as a non-root user with env set and
 // returns its error and the recorded calls.
 func runDockerInit(t *testing.T, env map[string]string, args ...string) (error, []string) {
+	t.Helper()
+	return runDockerInitWithScripts(t, t.TempDir(), env, args...)
+}
+
+// dockerEntrypointWithInitDir returns the entrypoint reading init scripts from
+// dir instead of /docker-entrypoint-initdb.d.
+func dockerEntrypointWithInitDir(t *testing.T, dir string) string {
+	t.Helper()
+	script := extractDockerEntrypoint(t)
+	require.Contains(t, script, "/docker-entrypoint-initdb.d")
+	return strings.ReplaceAll(script, "/docker-entrypoint-initdb.d", dir)
+}
+
+// runDockerInitWithScripts is runDockerInit with init scripts read from
+// scripts.
+func runDockerInitWithScripts(t *testing.T, scripts string, env map[string]string, args ...string) (error, []string) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -60,7 +77,7 @@ func runDockerInit(t *testing.T, env map[string]string, args ...string) (error, 
 		require.NoError(t, os.WriteFile(filepath.Join(stubs, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755))
 	}
 	script := filepath.Join(dir, "docker-entrypoint.sh")
-	require.NoError(t, os.WriteFile(script, []byte(extractDockerEntrypoint(t)), 0o755))
+	require.NoError(t, os.WriteFile(script, []byte(dockerEntrypointWithInitDir(t, scripts)), 0o755))
 	log := filepath.Join(dir, "calls.log")
 
 	cmd := exec.Command(script, args...)
@@ -172,9 +189,9 @@ func TestDockerEntrypointRootUserRules(t *testing.T) {
 }
 
 // TestDockerEntrypointRootUserEndToEnd runs the real entrypoint with a real
-// dumbodb and mongosh (not inside Docker): the root user is created on a
-// fresh data directory, the server then requires authentication, and a
-// restart on the same data does not initialize again.
+// dumbodb and mongosh (not inside Docker): the root user is created and an
+// init script runs on a fresh data directory, the server then requires
+// authentication, and a restart on the same data does not initialize again.
 func TestDockerEntrypointRootUserEndToEnd(t *testing.T) {
 	if _, err := exec.LookPath("mongosh"); err != nil {
 		t.Skip("mongosh is not installed")
@@ -193,8 +210,9 @@ func TestDockerEntrypointRootUserEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.Symlink(mongosh, filepath.Join(bin, "mongosh")))
 
+	scripts := initScripts(t, map[string]string{"01-seed.js": `db.seed.insertOne({_id: 1, from: "init"})`})
 	script := filepath.Join(t.TempDir(), "docker-entrypoint.sh")
-	require.NoError(t, os.WriteFile(script, []byte(extractDockerEntrypoint(t)), 0o755))
+	require.NoError(t, os.WriteFile(script, []byte(dockerEntrypointWithInitDir(t, scripts)), 0o755))
 	data := t.TempDir()
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -217,6 +235,15 @@ func TestDockerEntrypointRootUserEndToEnd(t *testing.T) {
 		t.Fatal("the server did not start")
 		return nil
 	}
+	seeded := func() int64 {
+		uri := "mongodb://root:s3cr3t%20pw@" + addr + "/admin?directConnection=true"
+		client, err := mongo.Connect(options.Client().ApplyURI(uri).SetTimeout(10 * time.Second))
+		require.NoError(t, err)
+		defer client.Disconnect(context.Background())
+		n, err := client.Database("app").Collection("seed").CountDocuments(context.Background(), bson.D{})
+		require.NoError(t, err)
+		return n
+	}
 	ping := func(user, password string) error {
 		uri := "mongodb://" + addr + "/?directConnection=true"
 		if user != "" {
@@ -228,16 +255,96 @@ func TestDockerEntrypointRootUserEndToEnd(t *testing.T) {
 		return client.Database("admin").RunCommand(context.Background(), bson.D{{Key: "listDatabases", Value: 1}}).Err()
 	}
 
-	server := start("MONGO_INITDB_ROOT_USERNAME=root", "DUMBO_INITDB_ROOT_PASSWORD=s3cr3t pw")
+	server := start("MONGO_INITDB_ROOT_USERNAME=root", "DUMBO_INITDB_ROOT_PASSWORD=s3cr3t pw", "DUMBO_INITDB_DATABASE=app")
 	require.Error(t, ping("", ""), "the server must require authentication")
 	require.NoError(t, ping("root", "s3cr3t pw"))
 	require.Error(t, ping("root", "wrong"))
+	require.EqualValues(t, 1, seeded(), "the init script must have run against DUMBO_INITDB_DATABASE")
 	_ = server.Process.Signal(syscall.SIGTERM)
 	_ = server.Wait()
 
 	// Restarted on the same data with other credentials: no new user is
 	// created, and authentication stays on.
-	start("MONGO_INITDB_ROOT_USERNAME=other", "MONGO_INITDB_ROOT_PASSWORD=other")
+	start("MONGO_INITDB_ROOT_USERNAME=other", "MONGO_INITDB_ROOT_PASSWORD=other", "DUMBO_INITDB_DATABASE=app")
 	require.Error(t, ping("other", "other"))
 	require.NoError(t, ping("root", "s3cr3t pw"))
+	require.EqualValues(t, 1, seeded(), "init scripts must not run again")
+}
+
+// initScripts returns a directory holding init scripts with the given names
+// and contents.
+func initScripts(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, content := range files {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
+	}
+	return dir
+}
+
+// As the mongo image does, /docker-entrypoint-initdb.d scripts run once, on a
+// fresh data directory, against the temporary server: *.sh are sourced, *.js
+// run with mongosh against MONGO_INITDB_DATABASE (DUMBO_INITDB_DATABASE),
+// default "test", and anything else is ignored.
+func TestDockerEntrypointRunsInitScripts(t *testing.T) {
+	scripts := initScripts(t, map[string]string{
+		"01-setup.sh":  `echo "sh ran db=$MONGO_INITDB_DATABASE" >> "$STUB_LOG"`,
+		"02-data.js":   "db.c.insertOne({a: 1})",
+		"03-notes.txt": "ignored",
+	})
+	root := map[string]string{"MONGO_INITDB_ROOT_USERNAME": "root", "MONGO_INITDB_ROOT_PASSWORD": "pw"}
+
+	t.Run("AfterTheRootUserInOrder", func(t *testing.T) {
+		data := freshDataDir(t)
+		err, calls := runDockerInitWithScripts(t, scripts, root, "--data-dir", data)
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			"temp-dumbodb --data-dir " + data + " --addr 127.0.0.1:27017",
+			"mongosh createUser user=root pass=pw",
+			"sh ran db=test",
+			"mongosh-js test 02-data.js",
+			"dumbodb --data-dir " + data + " --addr 0.0.0.0:27017 --auth",
+			"dumbodb-env",
+		}, calls)
+	})
+
+	t.Run("ScriptsAloneInitializeWithoutAuth", func(t *testing.T) {
+		data := freshDataDir(t)
+		err, calls := runDockerInitWithScripts(t, scripts, nil, "--data-dir", data)
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			"temp-dumbodb --data-dir " + data + " --addr 127.0.0.1:27017",
+			"sh ran db=test",
+			"mongosh-js test 02-data.js",
+			"dumbodb --data-dir " + data + " --addr 0.0.0.0:27017",
+			"dumbodb-env",
+		}, calls)
+	})
+
+	t.Run("DatabaseSynonym", func(t *testing.T) {
+		err, calls := runDockerInitWithScripts(t, scripts, map[string]string{"DUMBO_INITDB_DATABASE": "app"}, "--data-dir", freshDataDir(t))
+		require.NoError(t, err)
+		require.Contains(t, calls, "mongosh-js app 02-data.js")
+	})
+
+	t.Run("NotOnExistingData", func(t *testing.T) {
+		data := freshDataDir(t, "app")
+		err, calls := runDockerInitWithScripts(t, scripts, nil, "--data-dir", data)
+		require.NoError(t, err)
+		require.Equal(t, []string{"dumbodb --data-dir " + data + " --addr 0.0.0.0:27017", "dumbodb-env"}, calls)
+	})
+
+	t.Run("OnlyIgnoredFilesDoNotInitialize", func(t *testing.T) {
+		data := freshDataDir(t)
+		err, calls := runDockerInitWithScripts(t, initScripts(t, map[string]string{"README": "x"}), nil, "--data-dir", data)
+		require.NoError(t, err)
+		require.Equal(t, []string{"dumbodb --data-dir " + data + " --addr 0.0.0.0:27017", "dumbodb-env"}, calls)
+	})
+
+	t.Run("DatabaseNamesDiffer", func(t *testing.T) {
+		err, calls := runDockerInitWithScripts(t, scripts,
+			map[string]string{"MONGO_INITDB_DATABASE": "a", "DUMBO_INITDB_DATABASE": "b"}, "--data-dir", freshDataDir(t))
+		require.Error(t, err)
+		require.Empty(t, calls)
+	})
 }
