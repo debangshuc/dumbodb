@@ -14,7 +14,7 @@ data/
 
 # Gas Town (added by gt)
 CLAUDE.local.md
-dumbodb
+/dumbodb
 
 # Editor swap and backup files
 *.swp
