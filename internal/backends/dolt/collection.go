@@ -195,7 +195,7 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 				}
 				return &backends.QueryResult{Iter: iter, Sorted: true}, nil
 			}
-			docs, err := plan.fetch(ctx, state, m)
+			docs, err := plan.fetch(ctx, state, m, params.Fields)
 			if err != nil {
 				return nil, err
 			}
@@ -495,7 +495,7 @@ func (c *collection) tryIndexLookup(ctx context.Context, state *dbState, primary
 	if err != nil || plan == nil {
 		return nil, false, err
 	}
-	docs, err := plan.fetch(ctx, state, primary)
+	docs, err := plan.fetch(ctx, state, primary, nil)
 	return docs, true, err
 }
 
@@ -717,8 +717,9 @@ func planIndexLookupIn(ctx context.Context, primary prolly.Map, idxInfos []backe
 	return plan, nil
 }
 
-// fetch reads the plan's documents from the primary map.
-func (plan *indexLookupPlan) fetch(ctx context.Context, state *dbState, primary prolly.Map) ([]*types.Document, error) {
+// fetch reads the plan's documents from the primary map, keeping only fields
+// when it is non-nil.
+func (plan *indexLookupPlan) fetch(ctx context.Context, state *dbState, primary prolly.Map, fields []string) ([]*types.Document, error) {
 	docs := make([]*types.Document, 0, len(plan.ids))
 	for _, idBytes := range plan.ids {
 		key, err := buildKey(idBytes)
@@ -731,9 +732,12 @@ func (plan *indexLookupPlan) fetch(ctx context.Context, state *dbState, primary 
 				return nil
 			}
 			countDocsExamined(1)
-			var decErr error
-			doc, decErr = readDocFromValue(ctx, state.ns, v)
-			return decErr
+			stored, err := getBSONStoredBytes(ctx, state.ns, v)
+			if err != nil {
+				return err
+			}
+			doc, err = bsonToDocFields(stored, fields)
+			return err
 		}); err != nil {
 			return nil, fmt.Errorf("index lookup primary fetch: %w", err)
 		}
