@@ -1,24 +1,21 @@
+# Build output
+/dumbodb
+.runtime/
+
+# Agent tooling
 .beads/
 .claude/
-.runtime/
-/docudolt
-CLAUDE.md
-.idea/
-
-# Gas Town (added by gt)
 .logs/
+CLAUDE.md
+CLAUDE.local.md
+
+# Python
 __pycache__/
 
-# Docudolt runtime data directory (default --data-dir)
-data/
-
-# Gas Town (added by gt)
-CLAUDE.local.md
-dumbodb
-
-# Editor swap and backup files
+# Editors
+.idea/
 *.swp
 *.swo
 *.swn
-*~
 .*.sw[a-p]
+*~
