@@ -117,7 +117,7 @@ var unknownFieldPolicies = map[string]unknownFieldPolicy{
 	// --- DDL / introspection with larger MongoDB field sets (validated allow-lists) ---
 	"create": strictRejects, "createIndexes": strictRejects,
 	"listCollections": strictRejects, "listIndexes": strictRejects,
-	"compact": strictRejects,
+	"compact": strictRejects, "planCacheClear": strictRejects,
 
 	// --- legacy: MongoDB accepts unknown fields (verified) -> must NOT reject ---
 	"top": legacyAccepts, "hello": legacyAccepts, "isMaster": legacyAccepts,

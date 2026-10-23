@@ -16,6 +16,7 @@ package common
 
 import (
 	"github.com/dolthub/dumbodb/internal/collation"
+	"github.com/dolthub/dumbodb/internal/handler/commonpath"
 	"github.com/dolthub/dumbodb/internal/types"
 )
 
@@ -65,8 +66,8 @@ func collCompareOrderOp(a, b any, order types.SortType, cmp *collation.Comparato
 // cmp and falls back to standard ordering for non-string values.
 func lessFuncCollated(sortPath types.Path, sortType types.SortType, cmp *collation.Comparator) func(a, b *types.Document) bool {
 	return func(a, b *types.Document) bool {
-		aField := sortKeyValue(a, sortPath)
-		bField := sortKeyValue(b, sortPath)
+		aField := commonpath.SortKeyValue(a, sortPath)
+		bField := commonpath.SortKeyValue(b, sortPath)
 
 		aStr, aIsStr := aField.(string)
 		bStr, bIsStr := bField.(string)

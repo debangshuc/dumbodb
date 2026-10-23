@@ -29,7 +29,7 @@ var (
 		ActionCollMod, ActionCompact, ActionCreateCollection, ActionCreateIndex,
 		ActionDropCollection, ActionDropDatabase, ActionDropIndex, ActionDBStats,
 		ActionCollStats, ActionValidate, ActionRenameCollectionSameDB,
-		ActionListCollections, ActionListIndexes,
+		ActionListCollections, ActionListIndexes, ActionPlanCacheWrite,
 	}
 	userAdminActions = []Action{
 		ActionChangeCustomData, ActionChangePassword, ActionCreateRole, ActionCreateUser,

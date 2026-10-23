@@ -53,13 +53,19 @@ func (h *Handler) MsgServerStatus(connCtx context.Context, msg *wire.OpMsg) (*wi
 
 	uptime := time.Since(h.StateProvider.Get().Start)
 
-	commandMetrics := types.MakeDocument(0)
-	metrics := must.NotFail(types.NewDocument("commands", commandMetrics))
-
 	stats, err := h.b.Status(connCtx, new(backends.StatusParams))
 	if err != nil {
 		return nil, lazyerrors.Error(err)
 	}
+
+	commandMetrics := types.MakeDocument(0)
+	metrics := must.NotFail(types.NewDocument(
+		"commands", commandMetrics,
+		"queryExecutor", must.NotFail(types.NewDocument(
+			"scanned", stats.ScannedKeys,
+			"scannedObjects", stats.ScannedDocuments,
+		)),
+	))
 
 	res := must.NotFail(types.NewDocument(
 		"host", host,

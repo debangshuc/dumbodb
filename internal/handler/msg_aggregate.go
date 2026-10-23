@@ -283,6 +283,9 @@ func (h *Handler) MsgAggregate(connCtx context.Context, msg *wire.OpMsg) (*wire.
 			// $indexStats requires collection access to retrieve index metadata.
 			s, err = stages.NewIndexStatsStage(d, connCtx, c, h.TCPHost)
 
+		case "$planCacheStats":
+			s, err = stages.NewPlanCacheStatsStage(connCtx, c, dbName+"."+cName, h.TCPHost)
+
 		case "$match":
 			// A stage doc with more than one field is invalid; defer to NewStage
 			// for that error rather than the single-field NewMatchStage.
@@ -489,7 +492,8 @@ func (h *Handler) MsgAggregate(connCtx context.Context, msg *wire.OpMsg) (*wire.
 			}
 		}
 
-		if cInfo.IsView {
+		isView := cInfo.IsView
+		if isView {
 			view := cList.Collections[0]
 			baseCollection, viewStages, _, vErr := resolveViewChain(ctx, db, view.Name, view.ViewOn, view.ViewPipeline, collCmp)
 			if vErr != nil {
@@ -519,19 +523,25 @@ func (h *Handler) MsgAggregate(connCtx context.Context, msg *wire.OpMsg) (*wire.
 		case sort.Len() == 0 && cInfo.Capped():
 			// Pushdown default recordID sorting for capped collections
 			qp.Sort = must.NotFail(types.NewDocument("$natural", int64(1)))
-		case sort.Len() == 1:
-			if sort.Keys()[0] != "$natural" {
-				break
-			}
-
+		case sort.Len() == 1 && sort.Keys()[0] == "$natural":
+			qp.Sort = sort
+		case sort.Len() == 1 && !isView && collCmp == nil:
+			// The backend may walk an index in sort order, making the $sort
+			// stage a no-op.
 			qp.Sort = sort
 		}
+
+		var sortStage aggregations.Stage
+		if qp.Sort != nil && qp.Sort.Keys()[0] != "$natural" {
+			sortStage = stagesDocuments[pushdownSortStageIndex(aggregationStages)]
+		}
+		qp.LimitHint = pushdownLimit(aggregationStages)
 
 		if hint, _ := document.Get("hint"); hint != nil {
 			qp.Hint = hint
 		}
 
-		iter, err = processStagesDocuments(ctx, closer, &stagesDocumentsParams{c, qp, stagesDocuments})
+		iter, err = processStagesDocuments(ctx, closer, &stagesDocumentsParams{c, qp, stagesDocuments, sortStage})
 	} else {
 		statistics := stages.GetStatistics(collStatsDocuments)
 
@@ -925,6 +935,20 @@ type stagesDocumentsParams struct {
 	c      backends.Collection
 	qp     *backends.QueryParams
 	stages []aggregations.Stage
+	// sortStage is the $sort stage qp.Sort pushes down; it is skipped when
+	// the backend returns documents already in that order.
+	sortStage aggregations.Stage
+}
+
+// pushdownSortStageIndex returns the position of the $sort stage
+// aggregations.GetPushdownQuery pushes down.
+func pushdownSortStageIndex(aggregationStages []any) int {
+	for i := 0; i < len(aggregationStages) && i < 2; i++ {
+		if d := stageDocAt(aggregationStages, i); d != nil && d.Command() == "$sort" {
+			return i
+		}
+	}
+	panic("pushdownSortStageIndex: no $sort among the pushdown stages")
 }
 
 // processStagesDocuments retrieves the documents from the database and then processes them through the stages.
@@ -955,6 +979,35 @@ func sortLimitBound(aggregationStages []any, i int) int64 {
 		}
 	}
 
+	return 0
+}
+
+// pushdownLimit returns the $limit that directly follows the stages
+// aggregations.GetPushdownQuery pushes down (at most one $match and one $sort
+// leading the pipeline), else 0. The query layer applies it like a find limit.
+func pushdownLimit(aggregationStages []any) int64 {
+	seen := map[string]bool{}
+	for i := 0; i < len(aggregationStages); i++ {
+		d := stageDocAt(aggregationStages, i)
+		if d == nil {
+			return 0
+		}
+		switch cmd := d.Command(); cmd {
+		case "$match", "$sort":
+			if seen[cmd] || i >= 2 {
+				return 0
+			}
+			seen[cmd] = true
+		case "$limit":
+			if i == 0 {
+				return 0
+			}
+			l, _ := stageInt64(d, "$limit", common.GetLimitStageParam)
+			return l
+		default:
+			return 0
+		}
+	}
 	return 0
 }
 
@@ -994,6 +1047,9 @@ func processStagesDocuments(ctx context.Context, closer *iterator.MultiCloser, p
 	iter := queryRes.Iter
 
 	for _, s := range p.stages {
+		if queryRes.Sorted && s == p.sortStage {
+			continue
+		}
 		if iter, err = s.Process(ctx, iter, closer); err != nil {
 			return nil, err
 		}

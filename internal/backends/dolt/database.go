@@ -350,6 +350,7 @@ func (db *database) DropCollection(ctx context.Context, params *backends.DropCol
 
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	defer db.backend.planCache.clearPrefix(planCacheCollectionPrefix(db.name, db.rootish, params.Name))
 
 	dropBranchAM, err := state.getOrInitBranchAM(ctx, db.rootish)
 	if err != nil {
@@ -393,6 +394,8 @@ func (db *database) RenameCollection(ctx context.Context, params *backends.Renam
 
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	defer db.backend.planCache.clearPrefix(planCacheCollectionPrefix(db.name, db.rootish, params.OldName))
+	defer db.backend.planCache.clearPrefix(planCacheCollectionPrefix(db.name, db.rootish, params.NewName))
 
 	renameBranchAM, err := state.getOrInitBranchAM(ctx, db.rootish)
 	if err != nil {

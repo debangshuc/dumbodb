@@ -417,5 +417,5 @@ func viewSourceIterator(ctx context.Context, db backends.Database, viewName, vie
 		qp.Filter = filter
 	}
 
-	return processStagesDocuments(ctx, closer, &stagesDocumentsParams{srcColl, qp, viewStages})
+	return processStagesDocuments(ctx, closer, &stagesDocumentsParams{srcColl, qp, viewStages, nil})
 }

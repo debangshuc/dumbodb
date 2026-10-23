@@ -98,6 +98,7 @@ func (h *Handler) initCommands() {
 		"convertToCapped":          {Handler: h.MsgConvertToCapped, MutatesState: alwaysMutatesState, Help: "Converts an existing collection to a capped collection."},
 		"collStats":                {Handler: h.MsgCollStats, Help: "Returns storage data for a collection."},
 		"compact":                  {Handler: h.MsgCompact, Help: "Reduces the disk space collection takes and refreshes its statistics."},
+		"planCacheClear":           {Handler: h.MsgPlanCacheClear, Help: "Removes cached query plans for a collection."},
 		"connectionStatus":         {Handler: h.MsgConnectionStatus, anonymous: true, Help: "Returns information about the current connection, specifically the state of authenticated users and their available permissions."},
 		"count":                    {Handler: h.MsgCount, Help: "Returns the count of documents that's matched by the query."},
 		"create":                   {Handler: h.MsgCreate, MutatesState: alwaysMutatesState, Help: "Creates the collection."},

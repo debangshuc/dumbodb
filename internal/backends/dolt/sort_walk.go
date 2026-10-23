@@ -15,8 +15,11 @@
 package dolt
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
+	"slices"
 	"sort"
 
 	"github.com/dolthub/dolt/go/store/prolly"
@@ -24,6 +27,7 @@ import (
 
 	"github.com/dolthub/dumbodb/internal/backends"
 	"github.com/dolthub/dumbodb/internal/collation"
+	"github.com/dolthub/dumbodb/internal/handler/commonpath"
 	idxpkg "github.com/dolthub/dumbodb/internal/index"
 	"github.com/dolthub/dumbodb/internal/types"
 	"github.com/dolthub/dumbodb/internal/util/iterator"
@@ -65,10 +69,9 @@ func sortWalkIndex(infos []backends.IndexInfo, sortDoc *types.Document, queryCol
 
 // trySortWalk serves a single-field sort by walking the index led by the sort
 // field in sort order, fetching documents lazily so a downstream limit stops
-// the walk. It declines (false) when no index qualifies, when the query is
-// hinted onto another index, or when a multikey index holds array keys, whose
-// marker encoding does not sort where MongoDB sorts arrays.
-func (c *collection) trySortWalk(ctx context.Context, state *dbState, primary prolly.Map, params *backends.QueryParams) (types.DocumentsIterator, bool, error) {
+// the walk. It declines (false) when no index qualifies or when the query is
+// hinted onto another index.
+func (c *collection) trySortWalk(ctx context.Context, state *dbState, primary prolly.Map, params *backends.QueryParams) (*sortWalkIter, bool, error) {
 	if params.Collated || params.OnlyRecordIDs {
 		return nil, false, nil
 	}
@@ -86,14 +89,12 @@ func (c *collection) trySortWalk(ctx context.Context, state *dbState, primary pr
 		return nil, false, nil
 	}
 	idx, idxMap := infos[i], maps[i]
-	if idx.Multikey {
-		holdsArrays, err := idxpkg.HoldsArrayKeys(ctx, idxMap)
-		if err != nil || holdsArrays {
-			return nil, false, err
-		}
-	}
 
 	ascending := sortDirectionAscending(params.Sort)
+	path, err := types.NewPathFromString(idx.Key[0].Field)
+	if err != nil {
+		return nil, false, nil
+	}
 	var mapIter prolly.MapIter
 	if ascending {
 		mapIter, err = idxMap.IterAll(ctx)
@@ -105,12 +106,16 @@ func (c *collection) trySortWalk(ctx context.Context, state *dbState, primary pr
 	}
 
 	it := &sortWalkIter{
-		ctx:       ctx,
-		ns:        state.ns,
-		primary:   primary,
-		entries:   mapIter,
-		field:     idx.Key[0].Field,
-		ascending: ascending,
+		index:   idx.Name,
+		ctx:     ctx,
+		ns:      state.ns,
+		primary: primary,
+		entries: mapIter,
+		path:    path,
+		order:   types.Ascending,
+	}
+	if !ascending {
+		it.order = types.Descending
 	}
 	if idx.Multikey {
 		it.seen = make(map[string]struct{})
@@ -126,6 +131,145 @@ func (c *collection) trySortWalk(ctx context.Context, state *dbState, primary pr
 	return it, true, nil
 }
 
+// sortWalkWinsTrial returns the index Query walks for params when its trial
+// prefers that walk to the index serving the filter.
+func (c *collection) sortWalkWinsTrial(ctx context.Context, params *backends.QueryParams) (string, bool) {
+	primary, exists, state, err := c.getMap(ctx)
+	if err != nil || !exists {
+		return "", false
+	}
+	plan, err := c.planIndexLookup(ctx, state, primary, params.Filter, params.Hint, params.Collation, false)
+	if err != nil || plan == nil {
+		return "", false
+	}
+	iter, outcome, err := c.trySortWalkTrial(ctx, state, primary, params, plan)
+	if err != nil || outcome != trialWalkWon {
+		return "", false
+	}
+	iter.Close()
+	return iter.rest.index, true
+}
+
+// trialMaxResults is the result count at which MongoDB's multi-planner ends
+// its trial period.
+const trialMaxResults = 101
+
+// trialOutcome is what a sort-walk trial decided.
+type trialOutcome int
+
+const (
+	// trialNotRun: no competing walk, or the filter plan fits the target.
+	trialNotRun trialOutcome = iota
+	trialFilterWon
+	trialWalkWon
+)
+
+// trySortWalkTrial races the sort walk against plan, a filter served by a
+// different index, the way MongoDB's multi-planner trial does: plan finishes
+// after scanning its keys and then emitting its sorted documents up to the
+// trial target, while the walk examines one document per step, filtering as
+// it goes. The walk wins when it reaches the target, or its end, first; the
+// documents it examined are replayed ahead of the rest of the walk, returned
+// with trialWalkWon.
+func (c *collection) trySortWalkTrial(ctx context.Context, state *dbState, primary prolly.Map, params *backends.QueryParams, plan *indexLookupPlan) (*replayIter, trialOutcome, error) {
+	if params.Hint != nil {
+		return nil, trialNotRun, nil
+	}
+	target := trialTarget(params)
+	// A filter plan holding no more documents than the target already costs
+	// at most its keys plus an in-memory sort of target documents, so the
+	// trial cannot pay for itself.
+	if len(plan.ids) <= target {
+		return nil, trialNotRun, nil
+	}
+	walk, ok, err := c.trySortWalk(ctx, state, primary, params)
+	if err != nil || !ok {
+		return nil, trialNotRun, err
+	}
+	if walk.index == plan.index {
+		walk.Close()
+		return nil, trialNotRun, nil
+	}
+
+	iter, run, err := runWalkWithin(walk, params, filterPlanWorks(plan, params)-1)
+	switch {
+	case err != nil:
+		return nil, trialNotRun, err
+	case run == walkReachedTarget:
+		return iter, trialWalkWon, nil
+	case run == walkOverBudget:
+		return nil, trialFilterWon, nil
+	}
+	return nil, trialNotRun, nil
+}
+
+// filterPlanWorks is the trial steps plan takes: its keys, then its sorted
+// documents up to the trial target.
+func filterPlanWorks(plan *indexLookupPlan, params *backends.QueryParams) int {
+	return plan.keys + 1 + min(len(plan.ids), trialTarget(params))
+}
+
+// walkRun is how a budgeted walk ended.
+type walkRun int
+
+const (
+	walkReachedTarget walkRun = iota // the target matched, or the walk ended
+	walkOverBudget
+	walkFilterFailed // the filter could not be evaluated on a document
+)
+
+// runWalkWithin examines walk's documents, filtering as it goes, until the
+// trial target matches or the walk ends, and returns them replayed ahead of
+// the rest of the walk. After maxSteps documents, or a filter error, it
+// closes walk instead.
+func runWalkWithin(walk *sortWalkIter, params *backends.QueryParams, maxSteps int) (*replayIter, walkRun, error) {
+	target := trialTarget(params)
+	var examined []*types.Document
+	matched := 0
+	for len(examined) < maxSteps {
+		_, doc, err := walk.Next()
+		if errors.Is(err, iterator.ErrIteratorDone) {
+			return &replayIter{docs: examined, rest: walk}, walkReachedTarget, nil
+		}
+		if err != nil {
+			walk.Close()
+			return nil, walkFilterFailed, err
+		}
+		examined = append(examined, doc)
+		match, err := backends.MatchPartialFilter(doc, params.Filter)
+		if err != nil {
+			walk.Close()
+			return nil, walkFilterFailed, nil
+		}
+		if match {
+			if matched++; matched == target {
+				return &replayIter{docs: examined, rest: walk}, walkReachedTarget, nil
+			}
+		}
+	}
+	walk.Close()
+	return nil, walkOverBudget, nil
+}
+
+// replayIter yields docs, then the rest of the iterator they were read from.
+type replayIter struct {
+	docs []*types.Document
+	rest *sortWalkIter
+}
+
+func (it *replayIter) Next() (struct{}, *types.Document, error) {
+	if len(it.docs) > 0 {
+		doc := it.docs[0]
+		it.docs = it.docs[1:]
+		return struct{}{}, doc, nil
+	}
+	return it.rest.Next()
+}
+
+func (it *replayIter) Close() {
+	it.rest.Close()
+}
+
 type sortWalkEntry struct {
 	prefix []byte
 	id     []byte
@@ -135,18 +279,29 @@ type sortWalkEntry struct {
 // marker in the index, so a marker group is read whole and ordered by value.
 // For a multikey index a document is yielded at its first entry, which in an
 // ascending walk is its minimum key and in a descending walk its maximum, the
-// value MongoDB sorts it by.
+// value MongoDB sorts it by. Empty arrays have their own marker below every
+// value; nested arrays share one marker group, ordered by value like
+// subdocuments.
 type sortWalkIter struct {
-	ctx       context.Context
-	ns        tree.NodeStore
-	primary   prolly.Map
-	entries   prolly.MapIter
-	field     string
-	ascending bool
-	seen      map[string]struct{}
-	peeked    *sortWalkEntry
-	pending   []*types.Document
-	release   func()
+	index   string
+	ctx     context.Context
+	ns      tree.NodeStore
+	primary prolly.Map
+	entries prolly.MapIter
+	path    types.Path
+	order   types.SortType
+	seen    map[string]struct{}
+	peeked  *sortWalkEntry
+	pending []*types.Document
+	release func()
+}
+
+func (it *sortWalkIter) sortsBefore(a, b *types.Document) bool {
+	return types.CompareOrderForSort(commonpath.SortKeyValue(a, it.path), commonpath.SortKeyValue(b, it.path), it.order) == types.Less
+}
+
+func (it *sortWalkIter) sortByValue(docs []*types.Document) {
+	sort.SliceStable(docs, func(i, j int) bool { return it.sortsBefore(docs[i], docs[j]) })
 }
 
 func (it *sortWalkIter) nextEntry() (*sortWalkEntry, error) {
@@ -165,6 +320,7 @@ func (it *sortWalkIter) nextEntry() (*sortWalkEntry, error) {
 		if err != nil {
 			return nil, err
 		}
+		countKeysExamined(1)
 		composite, ok := keyDesc.GetBytes(0, k)
 		if !ok || len(composite) < primaryIDLen+1 {
 			continue
@@ -195,34 +351,42 @@ func (it *sortWalkIter) fetch(e *sortWalkEntry) (*types.Document, error) {
 }
 
 func (it *sortWalkIter) Next() (struct{}, *types.Document, error) {
+	doc, err := it.nextWalked()
+	if err != nil {
+		return struct{}{}, nil, err
+	}
+	if doc == nil {
+		return struct{}{}, nil, iterator.ErrIteratorDone
+	}
+	return struct{}{}, doc, nil
+}
+
+// nextWalked returns the next document in index order, or nil at the end.
+func (it *sortWalkIter) nextWalked() (*types.Document, error) {
 	for {
 		if len(it.pending) > 0 {
 			doc := it.pending[0]
 			it.pending = it.pending[1:]
-			return struct{}{}, doc, nil
+			return doc, nil
 		}
 
 		e, err := it.nextEntry()
-		if err != nil {
-			return struct{}{}, nil, err
+		if err != nil || e == nil {
+			return nil, err
 		}
-		if e == nil {
-			return struct{}{}, nil, iterator.ErrIteratorDone
-		}
-
 		if !idxpkg.LeadingKeyMergesValues(e.prefix) {
 			doc, err := it.fetch(e)
 			if err != nil {
-				return struct{}{}, nil, err
+				return nil, err
 			}
 			if doc != nil {
-				return struct{}{}, doc, nil
+				return doc, nil
 			}
 			continue
 		}
 
 		if err := it.readMarkerGroup(e); err != nil {
-			return struct{}{}, nil, err
+			return nil, err
 		}
 	}
 }
@@ -248,18 +412,159 @@ func (it *sortWalkIter) readMarkerGroup(first *sortWalkEntry) error {
 			break
 		}
 	}
-	order := types.Ascending
-	if !it.ascending {
-		order = types.Descending
-	}
-	sort.SliceStable(group, func(i, j int) bool {
-		return types.CompareOrderForSort(indexFieldValue(group[i], it.field), indexFieldValue(group[j], it.field), order) == types.Less
-	})
+	it.sortByValue(group)
 	it.pending = group
 	return nil
 }
 
 func (it *sortWalkIter) Close() {
+	if it.release != nil {
+		it.release()
+	}
+}
+
+// sortedIter fetches the plan's documents lazily in index order, or reversed,
+// for a scan indexScanSortOrder found to yield sort order, so a downstream
+// limit stops the fetches.
+func (plan *indexLookupPlan) sortedIter(ctx context.Context, state *dbState, primary prolly.Map, sortDoc *types.Document, reverse bool) types.DocumentsIterator {
+	return newPlanSortedIter(ctx, state, primary, plan.ids, sortDoc, reverse)
+}
+
+// keySortedIter yields the plan's documents in sortDoc's order by sorting its
+// entries on their encoded value at index position pos, so a document is
+// fetched only when read. An entry whose values do not split is ordered by its
+// fetched document's value, encoded the same way.
+func (plan *indexLookupPlan) keySortedIter(ctx context.Context, state *dbState, primary prolly.Map, sortDoc *types.Document, pos int) (types.DocumentsIterator, error) {
+	path := must.NotFail(types.NewPathFromString(sortDoc.Keys()[0]))
+	sortKeys := make([][]byte, len(plan.ids))
+	for i, values := range plan.values {
+		if split, ok := idxpkg.SplitKeyValues(values, len(plan.info.Key)); ok {
+			sortKeys[i] = split[pos]
+			continue
+		}
+		doc, err := lookupDocFromPrimary(ctx, primary, state.ns, plan.ids[i])
+		if err != nil {
+			return nil, err
+		}
+		if doc != nil {
+			sortKeys[i] = idxpkg.EncodeValue(commonpath.SortKeyValue(doc, path))
+		}
+	}
+	order := make([]int, len(plan.ids))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortStableFunc(order, func(a, b int) int { return bytes.Compare(sortKeys[a], sortKeys[b]) })
+	ids := make([][]byte, len(order))
+	for i, o := range order {
+		ids[i] = plan.ids[o]
+	}
+	return newPlanSortedIter(ctx, state, primary, ids, sortDoc, !sortDirectionAscending(sortDoc)), nil
+}
+
+// newPlanSortedIter yields the documents of ids, which are in ascending sort
+// order, in sortDoc's order: backward when reverse.
+func newPlanSortedIter(ctx context.Context, state *dbState, primary prolly.Map, ids [][]byte, sortDoc *types.Document, reverse bool) types.DocumentsIterator {
+	if reverse {
+		ids = slices.Clone(ids)
+		slices.Reverse(ids)
+	}
+	it := &planSortedIter{
+		ctx:     ctx,
+		ns:      state.ns,
+		primary: primary,
+		ids:     ids,
+		path:    must.NotFail(types.NewPathFromString(sortDoc.Keys()[0])),
+		order:   types.Ascending,
+	}
+	if !sortDirectionAscending(sortDoc) {
+		it.order = types.Descending
+	}
+	if state.backend != nil && state.backend.backgroundRP != nil {
+		it.release = state.backend.backgroundRP.pinRoot(state.name, primary.HashOf())
+	}
+	return it
+}
+
+// planSortedIter yields documents in id order. Subdocument sort values share
+// one index key, so a run of them is read whole and ordered by value.
+type planSortedIter struct {
+	ctx     context.Context
+	ns      tree.NodeStore
+	primary prolly.Map
+	ids     [][]byte
+	path    types.Path
+	order   types.SortType
+	peeked  *types.Document
+	pending []*types.Document
+	release func()
+}
+
+func (it *planSortedIter) nextFetched() (*types.Document, error) {
+	if it.peeked != nil {
+		doc := it.peeked
+		it.peeked = nil
+		return doc, nil
+	}
+	for len(it.ids) > 0 {
+		id := it.ids[0]
+		it.ids = it.ids[1:]
+		doc, err := lookupDocFromPrimary(it.ctx, it.primary, it.ns, id)
+		if err != nil {
+			return nil, err
+		}
+		if doc != nil {
+			doc.SetRecordID(keyBytesToRecordID(id))
+			return doc, nil
+		}
+	}
+	return nil, nil
+}
+
+func (it *planSortedIter) isSubdocument(doc *types.Document) bool {
+	_, ok := commonpath.SortKeyValue(doc, it.path).(*types.Document)
+	return ok
+}
+
+func (it *planSortedIter) Next() (struct{}, *types.Document, error) {
+	if len(it.pending) > 0 {
+		doc := it.pending[0]
+		it.pending = it.pending[1:]
+		return struct{}{}, doc, nil
+	}
+	doc, err := it.nextFetched()
+	if err != nil {
+		return struct{}{}, nil, err
+	}
+	if doc == nil {
+		return struct{}{}, nil, iterator.ErrIteratorDone
+	}
+	if !it.isSubdocument(doc) {
+		return struct{}{}, doc, nil
+	}
+	group := []*types.Document{doc}
+	for {
+		next, err := it.nextFetched()
+		if err != nil {
+			return struct{}{}, nil, err
+		}
+		if next == nil {
+			break
+		}
+		if !it.isSubdocument(next) {
+			it.peeked = next
+			break
+		}
+		group = append(group, next)
+	}
+	sort.SliceStable(group, func(i, j int) bool {
+		return types.CompareOrderForSort(commonpath.SortKeyValue(group[i], it.path), commonpath.SortKeyValue(group[j], it.path), it.order) == types.Less
+	})
+	it.pending = group[1:]
+	return struct{}{}, group[0], nil
+}
+
+func (it *planSortedIter) Close() {
 	if it.release != nil {
 		it.release()
 	}

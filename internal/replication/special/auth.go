@@ -265,7 +265,7 @@ func supportedAction(action authz.Action) bool {
 	case authz.ActionFind, authz.ActionInsert, authz.ActionUpdate, authz.ActionRemove,
 		authz.ActionBypassDocumentValidation, authz.ActionCreateCollection, authz.ActionCreateIndex,
 		authz.ActionDropCollection, authz.ActionDropIndex, authz.ActionDropDatabase, authz.ActionCollMod,
-		authz.ActionCompact, authz.ActionConvertToCapped, authz.ActionRenameCollectionSameDB,
+		authz.ActionCompact, authz.ActionPlanCacheWrite, authz.ActionConvertToCapped, authz.ActionRenameCollectionSameDB,
 		authz.ActionCreateSearchIndexes, authz.ActionDropSearchIndex, authz.ActionListSearchIndexes,
 		authz.ActionUpdateSearchIndex, authz.ActionKillCursors, authz.ActionListCollections,
 		authz.ActionListIndexes, authz.ActionListDatabases, authz.ActionCollStats, authz.ActionDBStats,

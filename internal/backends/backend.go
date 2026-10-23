@@ -147,6 +147,10 @@ type StatusParams struct{}
 type StatusResult struct {
 	CountCollections       int64
 	CountCappedCollections int32
+	// ScannedKeys and ScannedDocuments total the index keys and documents
+	// queries have read since startup.
+	ScannedKeys      int64
+	ScannedDocuments int64
 }
 
 // Status returns backend's status.

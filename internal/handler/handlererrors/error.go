@@ -418,6 +418,10 @@ const (
 	// by command-line or config file.
 	ErrFreeMonitoringDisabled = ErrorCode(50840) // Location50840
 
+	// ErrAggregateCollectionMissing indicates that an aggregation stage needs
+	// a collection that does not exist.
+	ErrAggregateCollectionMissing = ErrorCode(50933) // Location50933
+
 	ErrRoleAlreadyExists = ErrorCode(51002) // Location51002
 
 	// ErrUserAlreadyExists indicates that user already exists.
