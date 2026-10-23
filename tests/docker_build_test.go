@@ -284,7 +284,14 @@ func TestDockerSmokeTestRunsInCI(t *testing.T) {
 
 	workflow, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "docker-smoke.yml"))
 	require.NoError(t, err)
-	require.Contains(t, string(workflow), "--build-arg DUMBODB_VERSION=source")
+	require.Contains(t, string(workflow), "DUMBODB_VERSION=source")
 	require.Contains(t, string(workflow), "dumbodb/docker/smoke-test.sh dumbodb:smoke")
 	require.Contains(t, string(workflow), "pull_request:")
+
+	// Runners start with an empty image store; reuse layers from earlier runs.
+	// mode=max also caches the intermediate build-from-source stage.
+	require.Contains(t, string(workflow), "uses: docker/build-push-action@")
+	require.Contains(t, string(workflow), "load: true")
+	require.Contains(t, string(workflow), "cache-from: type=gha")
+	require.Contains(t, string(workflow), "cache-to: type=gha,mode=max")
 }
