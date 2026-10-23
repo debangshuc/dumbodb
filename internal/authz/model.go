@@ -31,6 +31,7 @@ const (
 	ActionDropDatabase                 Action = "dropDatabase"
 	ActionCollMod                      Action = "collMod"
 	ActionCompact                      Action = "compact"
+	ActionPlanCacheWrite               Action = "planCacheWrite"
 	ActionConvertToCapped              Action = "convertToCapped"
 	ActionRenameCollectionSameDB       Action = "renameCollectionSameDB"
 	ActionCreateSearchIndexes          Action = "createSearchIndexes"

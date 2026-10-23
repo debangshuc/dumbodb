@@ -182,10 +182,10 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 				}
 				switch outcome {
 				case trialWalkWon:
-					c.db.backend.planCache.put(cacheKey, planCacheEntry{walkIndex: iter.rest.index, works: len(iter.docs)})
+					c.db.backend.planCache.put(cacheKey, newPlanCacheEntry(idxInfos, params, iter.rest.index, "", len(iter.docs)))
 					return &backends.QueryResult{Iter: iter, Sorted: true}, nil
 				case trialFilterWon:
-					c.db.backend.planCache.put(cacheKey, planCacheEntry{works: filterPlanWorks(plan, params)})
+					c.db.backend.planCache.put(cacheKey, newPlanCacheEntry(idxInfos, params, "", plan.index, filterPlanWorks(plan, params)))
 				}
 			}
 			if pos, ok := indexKeySortPosition(plan.info, params.Filter, params.Sort, params.Collation); fieldSort && ok {
@@ -1450,23 +1450,26 @@ func (c *collection) Explain(ctx context.Context, params *backends.ExplainParams
 	// and falls back to COLLSCAN -- the perf optimization (actually
 	// running the OR-union) is a separate ticket.
 	if orStage, ok := buildOrUnionPlan(params, idxInfos); ok {
+		winningDoc := orStage.toDoc()
 		qp := must.NotFail(types.NewDocument(
 			"namespace", c.db.name+"."+c.name,
 			"parsedQuery", parsedQuery,
-			"winningPlan", orStage.toDoc(),
-			"rejectedPlans", types.MakeArray(0),
 		))
+		c.planCacheExplain(params, idxInfos, qp, winningDoc)
+		qp.Set("winningPlan", winningDoc)
+		qp.Set("rejectedPlans", types.MakeArray(0))
 		return &backends.ExplainResult{QueryPlanner: qp}, nil
 	}
 
-	winningPlan := buildExplainPlan(command, params, picked, indexPicked, sortBy, covered)
+	winningDoc := buildExplainPlan(command, params, picked, indexPicked, sortBy, covered).toDoc()
 
 	qp := must.NotFail(types.NewDocument(
 		"namespace", c.db.name+"."+c.name,
 		"parsedQuery", parsedQuery,
-		"winningPlan", winningPlan.toDoc(),
-		"rejectedPlans", types.MakeArray(0),
 	))
+	c.planCacheExplain(params, idxInfos, qp, winningDoc)
+	qp.Set("winningPlan", winningDoc)
+	qp.Set("rejectedPlans", types.MakeArray(0))
 	return &backends.ExplainResult{
 		QueryPlanner: qp,
 	}, nil
@@ -1474,15 +1477,35 @@ func (c *collection) Explain(ctx context.Context, params *backends.ExplainParams
 
 // explainSortWalkTrial returns the sort index Query walks in place of the
 // filter's index for params, as decided by trySortWalkTrial.
+// explainQueryParams is the QueryParams the explained command runs with.
+func explainQueryParams(params *backends.ExplainParams) *backends.QueryParams {
+	qp := &backends.QueryParams{Filter: params.Filter, Sort: params.Sort, Hint: params.Hint, Collated: params.Collated, Collation: params.Collation}
+	if params.Limit != 0 {
+		qp.LimitHint = params.Skip + max(params.Limit, -params.Limit)
+	}
+	return qp
+}
+
+// planCacheExplain adds the plan cache fields MongoDB reports to an explain:
+// the hashes on queryPlanner, and whether the winning plan is cached.
+func (c *collection) planCacheExplain(params *backends.ExplainParams, idxInfos []backends.IndexInfo, queryPlanner, winningPlan *types.Document) {
+	if params == nil {
+		params = new(backends.ExplainParams)
+	}
+	qp := explainQueryParams(params)
+	shapeHash, keyHash := planCacheHashes(idxInfos, qp)
+	_, cached := c.db.backend.planCache.get(c.planCacheKey(idxInfos, qp))
+	winningPlan.Set("isCached", cached)
+	queryPlanner.Set("queryHash", shapeHash)
+	queryPlanner.Set("planCacheShapeHash", shapeHash)
+	queryPlanner.Set("planCacheKey", keyHash)
+}
+
 func (c *collection) explainSortWalkTrial(ctx context.Context, params *backends.ExplainParams, naturalHint, indexPicked bool, idxInfos []backends.IndexInfo) (backends.IndexInfo, bool) {
 	if naturalHint || !indexPicked || params == nil || params.Hint != nil || params.Collated || !sortIsSingleField(params.Sort) {
 		return backends.IndexInfo{}, false
 	}
-	qp := &backends.QueryParams{Filter: params.Filter, Sort: params.Sort, Collation: params.Collation}
-	if params.Limit != 0 {
-		qp.LimitHint = params.Skip + max(params.Limit, -params.Limit)
-	}
-	name, ok := c.sortWalkWinsTrial(ctx, qp)
+	name, ok := c.sortWalkWinsTrial(ctx, explainQueryParams(params))
 	if !ok {
 		return backends.IndexInfo{}, false
 	}

@@ -92,6 +92,7 @@ var commandPrivileges = map[string][]commandPrivilege{
 	"convertToCapped":  {{authz.ActionConvertToCapped, scopeCollection}},
 	"renameCollection": {{authz.ActionRenameCollectionSameDB, scopeCollection}},
 	"compact":          {{authz.ActionCompact, scopeCollection}},
+	"planCacheClear":   {{authz.ActionPlanCacheWrite, scopeCollection}},
 
 	"createSearchIndexes": {{authz.ActionCreateSearchIndexes, scopeCollection}},
 	"dropSearchIndex":     {{authz.ActionDropSearchIndex, scopeCollection}},

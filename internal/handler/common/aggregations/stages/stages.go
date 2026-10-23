@@ -74,7 +74,7 @@ var unsupportedStages = map[string]struct{}{
 	"$listSessions":           {},
 	"$lookup": {}, // handled specially in msg_aggregate.go via NewLookupStage
 	// $merge and $out handled specially in msg_aggregate.go via NewMergeStage/NewOutStage
-	"$planCacheStats":         {},
+	// $planCacheStats is handled specially in msg_aggregate.go via NewPlanCacheStatsStage
 	// $search is handled in Stages above (returns SearchNotEnabled error)
 	"$searchMeta":             {},
 	// "$setWindowFields" is now implemented above

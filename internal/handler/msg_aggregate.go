@@ -283,6 +283,9 @@ func (h *Handler) MsgAggregate(connCtx context.Context, msg *wire.OpMsg) (*wire.
 			// $indexStats requires collection access to retrieve index metadata.
 			s, err = stages.NewIndexStatsStage(d, connCtx, c, h.TCPHost)
 
+		case "$planCacheStats":
+			s, err = stages.NewPlanCacheStatsStage(connCtx, c, dbName+"."+cName, h.TCPHost)
+
 		case "$match":
 			// A stage doc with more than one field is invalid; defer to NewStage
 			// for that error rather than the single-field NewMatchStage.

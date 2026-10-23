@@ -16,6 +16,7 @@ package dolt
 
 import (
 	"container/list"
+	"context"
 	"fmt"
 	"hash/fnv"
 	"strconv"
@@ -26,6 +27,7 @@ import (
 	"github.com/dolthub/dumbodb/internal/backends"
 	"github.com/dolthub/dumbodb/internal/collation"
 	"github.com/dolthub/dumbodb/internal/types"
+	"github.com/dolthub/dumbodb/internal/util/must"
 )
 
 // queryShape returns the plan cache key of params: everything that decides
@@ -33,19 +35,25 @@ import (
 // in filter values share a shape; field order is kept because the planner
 // picks the first indexed field.
 func queryShape(params *backends.QueryParams) string {
+	return filterSortShape(params.Filter, params.Sort) + planOptionsShape(params) + fmt.Sprintf("|t:%d", trialTarget(params))
+}
+
+// filterSortShape is the part of a shape planCacheClear names.
+func filterSortShape(filter, sort *types.Document) string {
 	var b strings.Builder
 	b.WriteString("f:")
-	writeFilterShape(&b, params.Filter)
+	writeFilterShape(&b, filter)
 	b.WriteString("|s:")
-	if params.Sort != nil {
-		for _, k := range params.Sort.Keys() {
-			fmt.Fprintf(&b, "%q=%v,", k, valueOrNil(params.Sort, k))
+	if sort != nil {
+		for _, k := range sort.Keys() {
+			fmt.Fprintf(&b, "%q=%v,", k, valueOrNil(sort, k))
 		}
 	}
-	fmt.Fprintf(&b, "|h:%s", hintShape(params.Hint))
-	fmt.Fprintf(&b, "|c:%t:%s", params.Collated, collation.Parse(params.Collation).Identity())
-	fmt.Fprintf(&b, "|t:%d", trialTarget(params))
 	return b.String()
+}
+
+func planOptionsShape(params *backends.QueryParams) string {
+	return fmt.Sprintf("|h:%s|c:%t:%s", hintShape(params.Hint), params.Collated, collation.Parse(params.Collation).Identity())
 }
 
 // trialTarget is the result count at which the sort-walk trial ends for params.
@@ -187,10 +195,19 @@ const planCacheReplanFactor = 10
 
 // planCacheEntry is the cached outcome of a sort-walk trial: the index the
 // walk won on, or empty when the filter's index won, and the trial steps the
-// winner took.
+// winner took. The rest describes the entry to $planCacheStats.
 type planCacheEntry struct {
-	walkIndex string
-	works     int
+	walkIndex   string
+	filterIndex string
+	works       int
+
+	filterSort string
+	shapeHash  string
+	keyHash    string
+	filter     *types.Document
+	sort       *types.Document
+	limit      int64
+	created    time.Time
 }
 
 // budget is how many steps a cached plan may take for params before replanning.
@@ -256,14 +273,32 @@ func (pc *planCache) evict(key string) {
 
 // clearPrefix evicts every entry whose key starts with prefix.
 func (pc *planCache) clearPrefix(prefix string) {
+	pc.clearMatching(prefix, func(planCacheEntry) bool { return true })
+}
+
+// clearMatching evicts the entries under prefix that match reports.
+func (pc *planCache) clearMatching(prefix string, match func(planCacheEntry) bool) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 	for key, el := range pc.entries {
-		if strings.HasPrefix(key, prefix) {
+		if strings.HasPrefix(key, prefix) && match(el.Value.(*planCacheItem).entry) {
 			pc.lru.Remove(el)
 			delete(pc.entries, key)
 		}
 	}
+}
+
+// list returns the entries under prefix, most recently used first.
+func (pc *planCache) list(prefix string) []planCacheEntry {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	var out []planCacheEntry
+	for el := pc.lru.Front(); el != nil; el = el.Next() {
+		if item := el.Value.(*planCacheItem); strings.HasPrefix(item.key, prefix) {
+			out = append(out, item.entry)
+		}
+	}
+	return out
 }
 
 func (pc *planCache) len() int {
@@ -285,7 +320,101 @@ func planCacheCollectionPrefix(db, rootish, coll string) string {
 // planCacheKey identifies params' plan on c. The index fingerprint makes any
 // index change miss every earlier entry.
 func (c *collection) planCacheKey(idxInfos []backends.IndexInfo, params *backends.QueryParams) string {
-	return planCacheCollectionPrefix(c.db.name, c.db.rootish, c.name) + indexFingerprint(idxInfos) + "\x00" + queryShape(params)
+	return c.planCachePrefix() + indexFingerprint(idxInfos) + "\x00" + queryShape(params)
+}
+
+func (c *collection) planCachePrefix() string {
+	return planCacheCollectionPrefix(c.db.name, c.db.rootish, c.name)
+}
+
+// planCacheHashes returns the planCacheShapeHash and planCacheKey explain and
+// $planCacheStats report for params: the shape without the trial target, and
+// the shape with the index fingerprint.
+func planCacheHashes(idxInfos []backends.IndexInfo, params *backends.QueryParams) (shapeHash, keyHash string) {
+	return hash32(filterSortShape(params.Filter, params.Sort) + planOptionsShape(params)),
+		hash32(indexFingerprint(idxInfos) + queryShape(params))
+}
+
+func hash32(s string) string {
+	h := fnv.New32a()
+	h.Write([]byte(s))
+	return fmt.Sprintf("%08X", h.Sum32())
+}
+
+// newPlanCacheEntry describes a trial winner for params on c.
+func newPlanCacheEntry(idxInfos []backends.IndexInfo, params *backends.QueryParams, walkIndex, filterIndex string, works int) planCacheEntry {
+	shapeHash, keyHash := planCacheHashes(idxInfos, params)
+	return planCacheEntry{
+		walkIndex:   walkIndex,
+		filterIndex: filterIndex,
+		works:       works,
+		filterSort:  filterSortShape(params.Filter, params.Sort),
+		shapeHash:   shapeHash,
+		keyHash:     keyHash,
+		filter:      params.Filter,
+		sort:        params.Sort,
+		limit:       params.LimitHint,
+		created:     time.Now().UTC(),
+	}
+}
+
+// cachedPlan is the plan tree $planCacheStats reports for e.
+func (e planCacheEntry) cachedPlan() *types.Document {
+	fetch := func(index string) *types.Document {
+		return must.NotFail(types.NewDocument(
+			"stage", "FETCH",
+			"inputStage", must.NotFail(types.NewDocument("stage", "IXSCAN", "indexName", index)),
+		))
+	}
+	if e.walkIndex != "" {
+		plan := fetch(e.walkIndex)
+		if e.limit > 0 {
+			plan = must.NotFail(types.NewDocument("stage", "LIMIT", "limitAmount", e.limit, "inputStage", plan))
+		}
+		return plan
+	}
+	sortStage := must.NotFail(types.NewDocument("stage", "SORT", "sortPattern", e.sort))
+	if e.limit > 0 {
+		sortStage.Set("limitAmount", e.limit)
+	}
+	sortStage.Set("inputStage", fetch(e.filterIndex))
+	return sortStage
+}
+
+// PlanCacheStats implements backends.PlanCacheCollection.
+func (c *collection) PlanCacheStats(ctx context.Context) ([]backends.PlanCacheEntry, error) {
+	_, exists, _, err := c.getMap(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, backends.NewError(backends.ErrorCodeCollectionDoesNotExist,
+			fmt.Errorf("collection '%s.%s' does not exist", c.db.name, c.name))
+	}
+	var out []backends.PlanCacheEntry
+	for _, e := range c.db.backend.planCache.list(c.planCachePrefix()) {
+		out = append(out, backends.PlanCacheEntry{
+			ShapeHash:  e.shapeHash,
+			Key:        e.keyHash,
+			Filter:     e.filter,
+			Sort:       e.sort,
+			CachedPlan: e.cachedPlan(),
+			Works:      int64(e.works),
+			Created:    e.created,
+		})
+	}
+	return out, nil
+}
+
+// PlanCacheClear implements backends.PlanCacheCollection.
+func (c *collection) PlanCacheClear(_ context.Context, params *backends.PlanCacheClearParams) error {
+	if params.Filter == nil {
+		c.db.backend.planCache.clearPrefix(c.planCachePrefix())
+		return nil
+	}
+	shape := filterSortShape(params.Filter, params.Sort)
+	c.db.backend.planCache.clearMatching(c.planCachePrefix(), func(e planCacheEntry) bool { return e.filterSort == shape })
+	return nil
 }
 
 // indexFingerprint hashes every index definition and planner-visible flag.

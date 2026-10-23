@@ -158,6 +158,7 @@ func _() {
 	_ = x[ErrSetEmptyPassword-50687]
 	_ = x[ErrStringProhibited-50692]
 	_ = x[ErrFreeMonitoringDisabled-50840]
+	_ = x[ErrAggregateCollectionMissing-50933]
 	_ = x[ErrRoleAlreadyExists-51002]
 	_ = x[ErrUserAlreadyExists-51003]
 	_ = x[ErrValueNegative-51024]
@@ -197,7 +198,7 @@ func _() {
 	_ = x[ErrAwaitableHelloTopologyVersionRequired-51756]
 }
 
-const _ErrorCode_name = "UnsetInternalErrorBadValueGraphContainsCycleFailedToParseUserNotFoundUnauthorizedTypeMismatchOverflowProtocolErrorAuthenticationFailedIllegalOperationInvalidBSONNamespaceNotFoundIndexNotFoundPathNotViableRoleNotFoundConflictingUpdateOperatorsCursorNotFoundNamespaceExistsInvalidRoleModificationMaxTimeMSExpiredDollarPrefixedFieldNameInvalidIdFieldEmptyFieldNameCommandNotFoundImmutableFieldCannotCreateIndexIndexAlreadyExistsInvalidOptionsInvalidNamespaceNoReplicationEnabledIndexOptionsConflictIndexKeySpecsConflictInvalidReplicaSetConfigNotYetInitializedOperationFailedWriteConflictCommandNotSupportedDocumentValidationFailureExceededMemoryLimitViewDepthLimitExceededCommandNotSupportedOnViewOptionNotSupportedOnViewInvalidPipelineOperatorClientMetadataCannotBeMutatedInvalidIndexSpecificationOptionTimeProofMismatchKeysNotFoundTransactionTooOldNotImplementedNoSuchTransactionOperationNotSupportedInTransactionQueryExceededMemoryLimitNoDiskUseAllowedMechanismUnavailableUnsupportedOpQueryCommandLocation10065NotWritablePrimaryBSONObjectTooLargeDuplicateKeyDatabaseDifferCaseLocation15947Location15948Location15955Location15958Location15959Location15969Location15973Location15974Location15975Location15976Location15981Location15983Location15998Location16004Location16020Location16406Location16410Location16610Location16611Location16872Location16979Location17276Location28667Location28680Location28714Location28724Location28729Location28745Location28747Location28756Location28757Location28758Location28759Location28761Location28762Location28763Location28764Location28765Location28766Location28812Location28818Location31002SearchNotEnabledLocation31119Location31120Location31249Location31250Location31253Location31254Location31324Location31325Location31368Location31372Location31382Location31393Location31394Location31395Location34443Location34444Location34445Location34446Location34447Location34448Location34449Location40156Location40157Location40158Location40160Location40181Location40192Location40198Location40228Location40234Location40237Location40238Location40246Location40272Location40323Location40324Location40352Location40353IDLFailedToParseIDLUnknownFieldLocation40573Location40587Location40602Location40621Location40666Location50687Location50692Location50840Location51002Location51003Location51024Location51075Location51081Location51082Location51083Location51091Location51108Location51246Location51247Location51270Location51272Location51756Location3041701Location3041702Location3041703Location3041704Location4161101Location4161102Location4161103Location4161106Location4161107Location4161108Location4161109Location4822819Location5107200Location5107201Location5423901Location5447000Location5624900Location5626500Location5733415Location5739101Location7582300"
+const _ErrorCode_name = "UnsetInternalErrorBadValueGraphContainsCycleFailedToParseUserNotFoundUnauthorizedTypeMismatchOverflowProtocolErrorAuthenticationFailedIllegalOperationInvalidBSONNamespaceNotFoundIndexNotFoundPathNotViableRoleNotFoundConflictingUpdateOperatorsCursorNotFoundNamespaceExistsInvalidRoleModificationMaxTimeMSExpiredDollarPrefixedFieldNameInvalidIdFieldEmptyFieldNameCommandNotFoundImmutableFieldCannotCreateIndexIndexAlreadyExistsInvalidOptionsInvalidNamespaceNoReplicationEnabledIndexOptionsConflictIndexKeySpecsConflictInvalidReplicaSetConfigNotYetInitializedOperationFailedWriteConflictCommandNotSupportedDocumentValidationFailureExceededMemoryLimitViewDepthLimitExceededCommandNotSupportedOnViewOptionNotSupportedOnViewInvalidPipelineOperatorClientMetadataCannotBeMutatedInvalidIndexSpecificationOptionTimeProofMismatchKeysNotFoundTransactionTooOldNotImplementedNoSuchTransactionOperationNotSupportedInTransactionQueryExceededMemoryLimitNoDiskUseAllowedMechanismUnavailableUnsupportedOpQueryCommandLocation10065NotWritablePrimaryBSONObjectTooLargeDuplicateKeyDatabaseDifferCaseLocation15947Location15948Location15955Location15958Location15959Location15969Location15973Location15974Location15975Location15976Location15981Location15983Location15998Location16004Location16020Location16406Location16410Location16610Location16611Location16872Location16979Location17276Location28667Location28680Location28714Location28724Location28729Location28745Location28747Location28756Location28757Location28758Location28759Location28761Location28762Location28763Location28764Location28765Location28766Location28812Location28818Location31002SearchNotEnabledLocation31119Location31120Location31249Location31250Location31253Location31254Location31324Location31325Location31368Location31372Location31382Location31393Location31394Location31395Location34443Location34444Location34445Location34446Location34447Location34448Location34449Location40156Location40157Location40158Location40160Location40181Location40192Location40198Location40228Location40234Location40237Location40238Location40246Location40272Location40323Location40324Location40352Location40353IDLFailedToParseIDLUnknownFieldLocation40573Location40587Location40602Location40621Location40666Location50687Location50692Location50840Location50933Location51002Location51003Location51024Location51075Location51081Location51082Location51083Location51091Location51108Location51246Location51247Location51270Location51272Location51756Location3041701Location3041702Location3041703Location3041704Location4161101Location4161102Location4161103Location4161106Location4161107Location4161108Location4161109Location4822819Location5107200Location5107201Location5423901Location5447000Location5624900Location5626500Location5733415Location5739101Location7582300"
 
 var _ErrorCode_map = map[ErrorCode]string{
 	0:       _ErrorCode_name[0:5],
@@ -352,41 +353,42 @@ var _ErrorCode_map = map[ErrorCode]string{
 	50687:   _ErrorCode_name[2228:2241],
 	50692:   _ErrorCode_name[2241:2254],
 	50840:   _ErrorCode_name[2254:2267],
-	51002:   _ErrorCode_name[2267:2280],
-	51003:   _ErrorCode_name[2280:2293],
-	51024:   _ErrorCode_name[2293:2306],
-	51075:   _ErrorCode_name[2306:2319],
-	51081:   _ErrorCode_name[2319:2332],
-	51082:   _ErrorCode_name[2332:2345],
-	51083:   _ErrorCode_name[2345:2358],
-	51091:   _ErrorCode_name[2358:2371],
-	51108:   _ErrorCode_name[2371:2384],
-	51246:   _ErrorCode_name[2384:2397],
-	51247:   _ErrorCode_name[2397:2410],
-	51270:   _ErrorCode_name[2410:2423],
-	51272:   _ErrorCode_name[2423:2436],
-	51756:   _ErrorCode_name[2436:2449],
-	3041701: _ErrorCode_name[2449:2464],
-	3041702: _ErrorCode_name[2464:2479],
-	3041703: _ErrorCode_name[2479:2494],
-	3041704: _ErrorCode_name[2494:2509],
-	4161101: _ErrorCode_name[2509:2524],
-	4161102: _ErrorCode_name[2524:2539],
-	4161103: _ErrorCode_name[2539:2554],
-	4161106: _ErrorCode_name[2554:2569],
-	4161107: _ErrorCode_name[2569:2584],
-	4161108: _ErrorCode_name[2584:2599],
-	4161109: _ErrorCode_name[2599:2614],
-	4822819: _ErrorCode_name[2614:2629],
-	5107200: _ErrorCode_name[2629:2644],
-	5107201: _ErrorCode_name[2644:2659],
-	5423901: _ErrorCode_name[2659:2674],
-	5447000: _ErrorCode_name[2674:2689],
-	5624900: _ErrorCode_name[2689:2704],
-	5626500: _ErrorCode_name[2704:2719],
-	5733415: _ErrorCode_name[2719:2734],
-	5739101: _ErrorCode_name[2734:2749],
-	7582300: _ErrorCode_name[2749:2764],
+	50933:   _ErrorCode_name[2267:2280],
+	51002:   _ErrorCode_name[2280:2293],
+	51003:   _ErrorCode_name[2293:2306],
+	51024:   _ErrorCode_name[2306:2319],
+	51075:   _ErrorCode_name[2319:2332],
+	51081:   _ErrorCode_name[2332:2345],
+	51082:   _ErrorCode_name[2345:2358],
+	51083:   _ErrorCode_name[2358:2371],
+	51091:   _ErrorCode_name[2371:2384],
+	51108:   _ErrorCode_name[2384:2397],
+	51246:   _ErrorCode_name[2397:2410],
+	51247:   _ErrorCode_name[2410:2423],
+	51270:   _ErrorCode_name[2423:2436],
+	51272:   _ErrorCode_name[2436:2449],
+	51756:   _ErrorCode_name[2449:2462],
+	3041701: _ErrorCode_name[2462:2477],
+	3041702: _ErrorCode_name[2477:2492],
+	3041703: _ErrorCode_name[2492:2507],
+	3041704: _ErrorCode_name[2507:2522],
+	4161101: _ErrorCode_name[2522:2537],
+	4161102: _ErrorCode_name[2537:2552],
+	4161103: _ErrorCode_name[2552:2567],
+	4161106: _ErrorCode_name[2567:2582],
+	4161107: _ErrorCode_name[2582:2597],
+	4161108: _ErrorCode_name[2597:2612],
+	4161109: _ErrorCode_name[2612:2627],
+	4822819: _ErrorCode_name[2627:2642],
+	5107200: _ErrorCode_name[2642:2657],
+	5107201: _ErrorCode_name[2657:2672],
+	5423901: _ErrorCode_name[2672:2687],
+	5447000: _ErrorCode_name[2687:2702],
+	5624900: _ErrorCode_name[2702:2717],
+	5626500: _ErrorCode_name[2717:2732],
+	5733415: _ErrorCode_name[2732:2747],
+	5739101: _ErrorCode_name[2747:2762],
+	7582300: _ErrorCode_name[2762:2777],
 }
 
 func (i ErrorCode) String() string {

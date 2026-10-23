@@ -256,3 +256,55 @@ func TestPlanCacheReplansOverBudget(t *testing.T) {
 		}
 	})
 }
+
+func TestPlanCacheStatsAndClear(t *testing.T) {
+	b, _ := newSortVsFilterBackend(t, 3000)
+	c := rawCollection(b, "idxdb", "tests")
+	ctx := context.Background()
+	doc := func(pairs ...any) *types.Document { return must.NotFail(types.NewDocument(pairs...)) }
+	query := func(filter *types.Document) {
+		t.Helper()
+		res, err := c.Query(ctx, &backends.QueryParams{Filter: filter, Sort: sortOn("k", 1), LimitHint: 5})
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Iter.Close()
+	}
+	stats := func() []backends.PlanCacheEntry {
+		t.Helper()
+		entries, err := c.PlanCacheStats(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return entries
+	}
+
+	query(doc("p", int32(1)))
+	query(doc("q", doc("$lt", int32(10))))
+	entries := stats()
+	if len(entries) != 2 {
+		t.Fatalf("%d entries, want 2", len(entries))
+	}
+	walk := entries[1]
+	if got := must.NotFail(walk.CachedPlan.Get("stage")); got != "LIMIT" || walk.ShapeHash == "" || walk.Key == "" || walk.Works <= 0 {
+		t.Fatalf("walk entry = %+v", walk)
+	}
+
+	if err := c.PlanCacheClear(ctx, &backends.PlanCacheClearParams{Filter: doc("p", int32(9)), Sort: sortOn("k", 1)}); err != nil {
+		t.Fatal(err)
+	}
+	if entries = stats(); len(entries) != 1 || must.NotFail(entries[0].CachedPlan.Get("stage")) != "SORT" {
+		t.Fatalf("after clearing the p shape: %+v, want only the filter entry", entries)
+	}
+	if err := c.PlanCacheClear(ctx, &backends.PlanCacheClearParams{}); err != nil {
+		t.Fatal(err)
+	}
+	if entries = stats(); len(entries) != 0 {
+		t.Fatalf("after clearing the collection: %d entries", len(entries))
+	}
+
+	missing := rawCollection(b, "idxdb", "missing")
+	if _, err := missing.PlanCacheStats(ctx); !backends.ErrorCodeIs(err, backends.ErrorCodeCollectionDoesNotExist) {
+		t.Fatalf("stats on a missing collection: %v", err)
+	}
+}

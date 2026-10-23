@@ -500,6 +500,56 @@ func (cc *collectionContract) Compact(ctx context.Context, params *CompactParams
 	return res, err
 }
 
+// PlanCacheCollection is implemented by collections that cache query plans.
+type PlanCacheCollection interface {
+	PlanCacheStats(context.Context) ([]PlanCacheEntry, error)
+	PlanCacheClear(context.Context, *PlanCacheClearParams) error
+}
+
+// PlanCacheEntry describes one cached plan, as listed by $planCacheStats.
+type PlanCacheEntry struct {
+	ShapeHash  string
+	Key        string
+	Filter     *types.Document
+	Sort       *types.Document
+	CachedPlan *types.Document
+	Works      int64
+	Created    time.Time
+}
+
+// PlanCacheClearParams selects the entries planCacheClear removes: those of
+// the shape of Filter and Sort, or every entry when Filter is nil.
+type PlanCacheClearParams struct {
+	Filter *types.Document
+	Sort   *types.Document
+}
+
+// PlanCacheStats lists the collection's cached plans. A collection that does
+// not cache plans has none.
+func (cc *collectionContract) PlanCacheStats(ctx context.Context) ([]PlanCacheEntry, error) {
+	pc, ok := cc.c.(PlanCacheCollection)
+	if !ok {
+		return nil, nil
+	}
+	res, err := pc.PlanCacheStats(ctx)
+	checkError(err, ErrorCodeCollectionDoesNotExist)
+	return res, err
+}
+
+// PlanCacheClear removes the collection's cached plans selected by params.
+func (cc *collectionContract) PlanCacheClear(ctx context.Context, params *PlanCacheClearParams) error {
+	pc, ok := cc.c.(PlanCacheCollection)
+	if !ok {
+		return nil
+	}
+	if params == nil {
+		params = new(PlanCacheClearParams)
+	}
+	err := pc.PlanCacheClear(ctx, params)
+	checkError(err)
+	return err
+}
+
 type ListIndexesParams struct{}
 
 type ListIndexesResult struct {
