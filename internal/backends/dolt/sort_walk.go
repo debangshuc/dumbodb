@@ -167,6 +167,16 @@ func (c *collection) trySortWalkTrial(ctx context.Context, state *dbState, prima
 	if params.Hint != nil {
 		return nil, false, nil
 	}
+	target := trialMaxResults
+	if params.LimitHint > 0 && params.LimitHint < trialMaxResults {
+		target = int(params.LimitHint)
+	}
+	// A filter plan holding no more documents than the target already costs
+	// at most its keys plus an in-memory sort of target documents, so the
+	// trial cannot pay for itself.
+	if len(plan.ids) <= target {
+		return nil, false, nil
+	}
 	walk, ok, err := c.trySortWalk(ctx, state, primary, params)
 	if err != nil || !ok {
 		return nil, false, err
@@ -176,10 +186,6 @@ func (c *collection) trySortWalkTrial(ctx context.Context, state *dbState, prima
 		return nil, false, nil
 	}
 
-	target := trialMaxResults
-	if params.LimitHint > 0 && params.LimitHint < trialMaxResults {
-		target = int(params.LimitHint)
-	}
 	planSteps := plan.keys + 1 + min(len(plan.ids), target)
 
 	var examined []*types.Document

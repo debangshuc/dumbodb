@@ -203,6 +203,32 @@ func TestSortWalkTrialAgainstFilterIndex(t *testing.T) {
 	}
 }
 
+func TestSortWalkTrialNotRunWhenFilterFitsTheLimit(t *testing.T) {
+	c := newSortVsFilterCollection(t, 3000)
+	q := must.NotFail(types.NewDocument("q", must.NotFail(types.NewDocument("$gte", int32(100), "$lt", int32(105)))))
+	for _, tc := range []struct {
+		name       string
+		limit      int64
+		keys, docs int64
+	}{
+		{"limit equal to the matches", 5, 5, 5},
+		{"limit above the matches", 10, 5, 5},
+		{"no limit", 0, 5, 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keys, docs := queryExecutorCounters.keys.Load(), queryExecutorCounters.docs.Load()
+			ids, sorted := sortWalkQuery(t, c, &backends.QueryParams{Filter: q, Sort: sortOn("k", 1), LimitHint: tc.limit})
+			gotKeys, gotDocs := queryExecutorCounters.keys.Load()-keys, queryExecutorCounters.docs.Load()-docs
+			if sorted || len(ids) != 5 {
+				t.Fatalf("walked = %v with %d documents, want the filter index's 5", sorted, len(ids))
+			}
+			if gotKeys != tc.keys || gotDocs != tc.docs {
+				t.Fatalf("examined %d keys, %d docs; want %d, %d (no trial walk)", gotKeys, gotDocs, tc.keys, tc.docs)
+			}
+		})
+	}
+}
+
 func TestIndexScanInSortOrder(t *testing.T) {
 	doc := func(id, grp int32, k any) *types.Document {
 		return must.NotFail(types.NewDocument("_id", id, "grp", grp, "k", k))
