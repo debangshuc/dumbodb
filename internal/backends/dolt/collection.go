@@ -149,9 +149,14 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 				return nil, err
 			}
 			if ok && walk.index == cached.walkIndex {
-				return &backends.QueryResult{Iter: walk, Sorted: true}, nil
-			}
-			if ok {
+				iter, run, err := runWalkWithin(walk, params, cached.budget(params))
+				if err != nil {
+					return nil, err
+				}
+				if run == walkReachedTarget {
+					return &backends.QueryResult{Iter: iter, Sorted: true}, nil
+				}
+			} else if ok {
 				walk.Close()
 			}
 			c.db.backend.planCache.evict(cacheKey)
@@ -166,6 +171,10 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 			if reverse, ok := indexScanSortOrder(plan.info, params.Filter, params.Sort, params.Collation); fieldSort && ok {
 				return &backends.QueryResult{Iter: plan.sortedIter(ctx, state, m, params.Sort, reverse), Sorted: true}, nil
 			}
+			if hit && filterPlanWorks(plan, params) > cached.budget(params) {
+				c.db.backend.planCache.evict(cacheKey)
+				hit = false
+			}
 			if fieldSort && !hit {
 				iter, outcome, err := c.trySortWalkTrial(ctx, state, m, params, plan)
 				if err != nil {
@@ -173,10 +182,10 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 				}
 				switch outcome {
 				case trialWalkWon:
-					c.db.backend.planCache.put(cacheKey, planCacheEntry{walkIndex: iter.rest.index})
+					c.db.backend.planCache.put(cacheKey, planCacheEntry{walkIndex: iter.rest.index, works: len(iter.docs)})
 					return &backends.QueryResult{Iter: iter, Sorted: true}, nil
 				case trialFilterWon:
-					c.db.backend.planCache.put(cacheKey, planCacheEntry{})
+					c.db.backend.planCache.put(cacheKey, planCacheEntry{works: filterPlanWorks(plan, params)})
 				}
 			}
 			if pos, ok := indexKeySortPosition(plan.info, params.Filter, params.Sort, params.Collation); fieldSort && ok {

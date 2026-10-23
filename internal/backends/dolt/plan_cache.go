@@ -181,10 +181,21 @@ func hintShape(hint any) string {
 // planCacheMaxEntries bounds the plan cache across all collections.
 const planCacheMaxEntries = 10000
 
+// planCacheReplanFactor is how many times its trial works a cached plan may
+// take before it is evicted and the query replanned, as in MongoDB.
+const planCacheReplanFactor = 10
+
 // planCacheEntry is the cached outcome of a sort-walk trial: the index the
-// walk won on, or empty when the filter's index won.
+// walk won on, or empty when the filter's index won, and the trial steps the
+// winner took.
 type planCacheEntry struct {
 	walkIndex string
+	works     int
+}
+
+// budget is how many steps a cached plan may take for params before replanning.
+func (e planCacheEntry) budget(params *backends.QueryParams) int {
+	return max(e.works*planCacheReplanFactor, trialTarget(params))
 }
 
 // planCache maps a query's collection, index set, and shape to the plan its

@@ -197,3 +197,62 @@ func TestPlanCacheSkipsTheTrial(t *testing.T) {
 		t.Fatalf("%d cache entries survive dropping the collection", n)
 	}
 }
+
+func TestPlanCacheReplansOverBudget(t *testing.T) {
+	b, _ := newSortVsFilterBackend(t, 3000)
+	c := rawCollection(b, "idxdb", "tests")
+	doc := func(pairs ...any) *types.Document { return must.NotFail(types.NewDocument(pairs...)) }
+	run := func(params *backends.QueryParams) (keys int64, walked bool, entry planCacheEntry, cached bool) {
+		t.Helper()
+		ctx := context.Background()
+		k0 := queryExecutorCounters.keys.Load()
+		res, err := c.Query(ctx, params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Iter.Close()
+		_, _, state, err := c.getMap(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		infos, _, err := resolveIndexes(ctx, c, state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry, cached = b.planCache.get(c.planCacheKey(infos, params))
+		return queryExecutorCounters.keys.Load() - k0, res.Sorted, entry, cached
+	}
+
+	t.Run("cached walk over budget replans", func(t *testing.T) {
+		byP := func(p int32) *backends.QueryParams {
+			return &backends.QueryParams{Filter: doc("p", p), Sort: sortOn("k", 1), LimitHint: 5}
+		}
+		if _, walked, entry, cached := run(byP(1)); !walked || !cached || entry.walkIndex != "k" {
+			t.Fatalf("p=1 walked %v, cached %v %+v; want the walk on k cached", walked, cached, entry)
+		}
+		// No document has p=7: the walk would read the whole index for no
+		// match. Over its budget it gives up and the query replans onto p.
+		keys, walked, _, cached := run(byP(7))
+		if walked || cached {
+			t.Fatalf("p=7 walked %v, still cached %v; want a replan onto the filter index", walked, cached)
+		}
+		if keys > 3000/2 {
+			t.Fatalf("p=7 examined %d keys; the walk should stop at its budget", keys)
+		}
+	})
+
+	t.Run("cached filter over budget replans", func(t *testing.T) {
+		byQ := func(q int32) *backends.QueryParams {
+			return &backends.QueryParams{Filter: doc("q", doc("$lt", q)), Sort: sortOn("k", 1), LimitHint: 5}
+		}
+		if _, walked, entry, cached := run(byQ(10)); walked || !cached || entry.walkIndex != "" {
+			t.Fatalf("q<10 walked %v, cached %v %+v; want the filter cached", walked, cached, entry)
+		}
+		// q<1000 holds a third of the documents: the filter plan reads 999
+		// keys, past its budget, so the trial runs again and the walk wins.
+		_, walked, entry, cached := run(byQ(1000))
+		if !walked || !cached || entry.walkIndex != "k" {
+			t.Fatalf("q<1000 walked %v, cached %v %+v; want a replan onto the walk", walked, cached, entry)
+		}
+	})
+}

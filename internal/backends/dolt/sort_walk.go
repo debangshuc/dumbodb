@@ -191,33 +191,64 @@ func (c *collection) trySortWalkTrial(ctx context.Context, state *dbState, prima
 		return nil, trialNotRun, nil
 	}
 
-	planSteps := plan.keys + 1 + min(len(plan.ids), target)
+	iter, run, err := runWalkWithin(walk, params, filterPlanWorks(plan, params)-1)
+	switch {
+	case err != nil:
+		return nil, trialNotRun, err
+	case run == walkReachedTarget:
+		return iter, trialWalkWon, nil
+	case run == walkOverBudget:
+		return nil, trialFilterWon, nil
+	}
+	return nil, trialNotRun, nil
+}
 
+// filterPlanWorks is the trial steps plan takes: its keys, then its sorted
+// documents up to the trial target.
+func filterPlanWorks(plan *indexLookupPlan, params *backends.QueryParams) int {
+	return plan.keys + 1 + min(len(plan.ids), trialTarget(params))
+}
+
+// walkRun is how a budgeted walk ended.
+type walkRun int
+
+const (
+	walkReachedTarget walkRun = iota // the target matched, or the walk ended
+	walkOverBudget
+	walkFilterFailed // the filter could not be evaluated on a document
+)
+
+// runWalkWithin examines walk's documents, filtering as it goes, until the
+// trial target matches or the walk ends, and returns them replayed ahead of
+// the rest of the walk. After maxSteps documents, or a filter error, it
+// closes walk instead.
+func runWalkWithin(walk *sortWalkIter, params *backends.QueryParams, maxSteps int) (*replayIter, walkRun, error) {
+	target := trialTarget(params)
 	var examined []*types.Document
 	matched := 0
-	for len(examined)+1 < planSteps {
+	for len(examined) < maxSteps {
 		_, doc, err := walk.Next()
 		if errors.Is(err, iterator.ErrIteratorDone) {
-			return &replayIter{docs: examined, rest: walk}, trialWalkWon, nil
+			return &replayIter{docs: examined, rest: walk}, walkReachedTarget, nil
 		}
 		if err != nil {
 			walk.Close()
-			return nil, trialNotRun, err
+			return nil, walkFilterFailed, err
 		}
 		examined = append(examined, doc)
 		match, err := backends.MatchPartialFilter(doc, params.Filter)
 		if err != nil {
 			walk.Close()
-			return nil, trialNotRun, nil
+			return nil, walkFilterFailed, nil
 		}
 		if match {
 			if matched++; matched == target {
-				return &replayIter{docs: examined, rest: walk}, trialWalkWon, nil
+				return &replayIter{docs: examined, rest: walk}, walkReachedTarget, nil
 			}
 		}
 	}
 	walk.Close()
-	return nil, trialFilterWon, nil
+	return nil, walkOverBudget, nil
 }
 
 // replayIter yields docs, then the rest of the iterator they were read from.
