@@ -89,9 +89,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # The Dockerfile downloads these binaries; fail fast if the release hasn't published them yet.
-          for arch in amd64 arm64; do
-            url="https://github.com/${{ github.repository }}/releases/download/${GIT_TAG}/dumbodb-linux-${arch}"
+          # The Dockerfile downloads these binaries and verifies them against
+          # SHA256SUMS; fail fast if the release hasn't published them yet.
+          for asset in dumbodb-linux-amd64 dumbodb-linux-arm64 SHA256SUMS; do
+            url="https://github.com/${{ github.repository }}/releases/download/${GIT_TAG}/${asset}"
             if ! curl -fsSLI -o /dev/null "${url}"; then
               echo "::error::Missing release artifact: ${url}. Run the Release Build workflow for ${GIT_TAG} first."
               exit 1

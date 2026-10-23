@@ -69,6 +69,10 @@ docker build -f docker/Dockerfile --build-arg DUMBODB_VERSION=latest \
   -t dumbodb:latest .
 ```
 
+Release builds verify the downloaded binary against the release's
+`SHA256SUMS` and fail if it does not match, so a version must come from a
+release that publishes checksums.
+
 ### Build from local source
 
 The build context must contain a `dumbodb/` directory with the source tree. From

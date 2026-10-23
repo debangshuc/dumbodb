@@ -5,11 +5,16 @@
 # ICU runtime the downloaded binaries are linked against. Aligning here
 # avoids the "libicui18n.so.74: cannot open shared object file" runtime
 # failure that older debian:bookworm-slim (ICU 72) produced.
+#
+# The runtime image builds on this stage, so it installs only what the server
+# needs: git for git remotes (Dolt's git blobstore runs the git command), tini,
+# and CA certificates for https remotes. curl is installed only in the
+# download stage.
 FROM ubuntu:24.04 AS base
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
-        curl git tini ca-certificates && \
+        git tini ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 
@@ -59,18 +64,46 @@ ARG DUMBODB_VERSION
 # TARGETARCH is provided automatically by BuildKit/buildx (amd64, arm64, ...).
 # It matches the suffix on release artifacts published by .github/workflows/release.yml.
 ARG TARGETARCH
-RUN if [ "$DUMBODB_VERSION" = "latest" ]; then \
-        # Fetch latest version number from GitHub API
-        DUMBODB_VERSION=$(curl -s https://api.github.com/repos/dolthub/dumbodb/releases/latest \
-            | grep '"tag_name"' \
-            | cut -d'"' -f4 \
-            | sed 's/^v//'); \
-    fi && \
-    if [ "$DUMBODB_VERSION" != "source" ]; then \
-        curl -fL -o /usr/local/bin/dumbodb \
-            "https://github.com/dolthub/dumbodb/releases/download/v${DUMBODB_VERSION}/dumbodb-linux-${TARGETARCH}" && \
-        chmod +x /usr/local/bin/dumbodb; \
-    fi
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Downloads the release binary and installs it only if it matches the
+# release's SHA256SUMS. Inline so the same Dockerfile works for release and
+# source builds, whose build contexts differ.
+COPY <<'EOF' /usr/local/bin/fetch-dumbodb.sh
+#!/bin/sh
+set -eu
+
+if [ "$DUMBODB_VERSION" = "source" ]; then
+	exit 0
+fi
+
+if [ "$DUMBODB_VERSION" = "latest" ]; then
+	DUMBODB_VERSION=$(curl -fsSL https://api.github.com/repos/dolthub/dumbodb/releases/latest |
+		grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
+	if [ -z "$DUMBODB_VERSION" ]; then
+		echo "could not resolve the latest DumboDB release" >&2
+		exit 1
+	fi
+fi
+
+release="https://github.com/dolthub/dumbodb/releases/download/v${DUMBODB_VERSION}"
+asset="dumbodb-linux-${TARGETARCH}"
+work=$(mktemp -d)
+cd "$work"
+
+curl -fsSL -o "$asset" "$release/$asset"
+curl -fsSL -o SHA256SUMS "$release/SHA256SUMS"
+grep " ${asset}\$" SHA256SUMS > expected || {
+	echo "SHA256SUMS has no entry for $asset" >&2
+	exit 1
+}
+sha256sum -c expected
+
+install -m 0755 "$asset" /usr/local/bin/dumbodb
+EOF
+RUN chmod 755 /usr/local/bin/fetch-dumbodb.sh && /usr/local/bin/fetch-dumbodb.sh
 
 
 FROM base AS runtime
