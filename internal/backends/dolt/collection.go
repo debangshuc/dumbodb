@@ -129,7 +129,36 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 
 	if !naturalHint && params != nil && params.Filter != nil && (params.Sort.Len() == 0 || fieldSort) &&
 		(!params.Collated || params.Collation != nil) {
-		plan, err := c.planIndexLookup(ctx, state, m, params.Filter, params.Hint, params.Collation, fieldSort)
+		state.mu.RLock()
+		idxInfos, idxMaps, err := resolveIndexes(ctx, c, state)
+		state.mu.RUnlock()
+		if err != nil {
+			return nil, err
+		}
+
+		var cacheKey string
+		var cached planCacheEntry
+		var hit bool
+		if fieldSort && params.Hint == nil && len(idxInfos) > 0 {
+			cacheKey = c.planCacheKey(idxInfos, params)
+			cached, hit = c.db.backend.planCache.get(cacheKey)
+		}
+		if hit && cached.walkIndex != "" {
+			walk, ok, err := c.trySortWalk(ctx, state, m, params)
+			if err != nil {
+				return nil, err
+			}
+			if ok && walk.index == cached.walkIndex {
+				return &backends.QueryResult{Iter: walk, Sorted: true}, nil
+			}
+			if ok {
+				walk.Close()
+			}
+			c.db.backend.planCache.evict(cacheKey)
+			hit = false
+		}
+
+		plan, err := planIndexLookupIn(ctx, m, idxInfos, idxMaps, params.Filter, params.Hint, params.Collation, fieldSort)
 		if err != nil {
 			return nil, err
 		}
@@ -137,13 +166,17 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 			if reverse, ok := indexScanSortOrder(plan.info, params.Filter, params.Sort, params.Collation); fieldSort && ok {
 				return &backends.QueryResult{Iter: plan.sortedIter(ctx, state, m, params.Sort, reverse), Sorted: true}, nil
 			}
-			if fieldSort {
+			if fieldSort && !hit {
 				iter, outcome, err := c.trySortWalkTrial(ctx, state, m, params, plan)
 				if err != nil {
 					return nil, err
 				}
-				if outcome == trialWalkWon {
+				switch outcome {
+				case trialWalkWon:
+					c.db.backend.planCache.put(cacheKey, planCacheEntry{walkIndex: iter.rest.index})
 					return &backends.QueryResult{Iter: iter, Sorted: true}, nil
+				case trialFilterWon:
+					c.db.backend.planCache.put(cacheKey, planCacheEntry{})
 				}
 			}
 			if pos, ok := indexKeySortPosition(plan.info, params.Filter, params.Sort, params.Collation); fieldSort && ok {
@@ -476,20 +509,24 @@ func (c *collection) planIndexLookup(ctx context.Context, state *dbState, primar
 	if filter == nil || filter.Len() == 0 {
 		return nil, nil
 	}
-
-	queryColl := collation.Parse(queryCollation)
-	queryIdentity := queryColl.Identity()
-	queryCmp := queryColl.Comparator()
-
 	state.mu.RLock()
 	idxInfos, idxMaps, err := resolveIndexes(ctx, c, state)
 	state.mu.RUnlock()
 	if err != nil {
 		return nil, err
 	}
-	if len(idxInfos) == 0 {
+	return planIndexLookupIn(ctx, primary, idxInfos, idxMaps, filter, hint, queryCollation, keepValues)
+}
+
+// planIndexLookupIn is planIndexLookup over already resolved indexes.
+func planIndexLookupIn(ctx context.Context, primary prolly.Map, idxInfos []backends.IndexInfo, idxMaps []prolly.Map, filter *types.Document, hint any, queryCollation *types.Document, keepValues bool) (*indexLookupPlan, error) {
+	if filter == nil || filter.Len() == 0 || len(idxInfos) == 0 {
 		return nil, nil
 	}
+
+	queryColl := collation.Parse(queryCollation)
+	queryIdentity := queryColl.Identity()
+	queryCmp := queryColl.Comparator()
 
 	// A hint naming a specific index forces selection: only that index is a
 	// candidate, matching what Explain reports (and MongoDB). When the hinted

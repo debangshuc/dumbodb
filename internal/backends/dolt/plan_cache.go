@@ -15,9 +15,12 @@
 package dolt
 
 import (
+	"container/list"
 	"fmt"
+	"hash/fnv"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dolthub/dumbodb/internal/backends"
@@ -173,4 +176,122 @@ func hintShape(hint any) string {
 		return b.String()
 	}
 	return fmt.Sprintf("%q", fmt.Sprint(hint))
+}
+
+// planCacheMaxEntries bounds the plan cache across all collections.
+const planCacheMaxEntries = 10000
+
+// planCacheEntry is the cached outcome of a sort-walk trial: the index the
+// walk won on, or empty when the filter's index won.
+type planCacheEntry struct {
+	walkIndex string
+}
+
+// planCache maps a query's collection, index set, and shape to the plan its
+// trial chose, so later queries of that shape skip the trial. Least recently
+// used entries are evicted past planCacheMaxEntries. The zero value is ready.
+type planCache struct {
+	mu      sync.Mutex
+	entries map[string]*list.Element
+	lru     list.List
+}
+
+type planCacheItem struct {
+	key   string
+	entry planCacheEntry
+}
+
+func (pc *planCache) get(key string) (planCacheEntry, bool) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	el, ok := pc.entries[key]
+	if !ok {
+		return planCacheEntry{}, false
+	}
+	pc.lru.MoveToFront(el)
+	return el.Value.(*planCacheItem).entry, true
+}
+
+func (pc *planCache) put(key string, entry planCacheEntry) {
+	if key == "" {
+		return
+	}
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	if pc.entries == nil {
+		pc.entries = make(map[string]*list.Element)
+	}
+	if el, ok := pc.entries[key]; ok {
+		el.Value.(*planCacheItem).entry = entry
+		pc.lru.MoveToFront(el)
+		return
+	}
+	pc.entries[key] = pc.lru.PushFront(&planCacheItem{key: key, entry: entry})
+	for pc.lru.Len() > planCacheMaxEntries {
+		oldest := pc.lru.Back()
+		pc.lru.Remove(oldest)
+		delete(pc.entries, oldest.Value.(*planCacheItem).key)
+	}
+}
+
+func (pc *planCache) evict(key string) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	if el, ok := pc.entries[key]; ok {
+		pc.lru.Remove(el)
+		delete(pc.entries, key)
+	}
+}
+
+// clearPrefix evicts every entry whose key starts with prefix.
+func (pc *planCache) clearPrefix(prefix string) {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	for key, el := range pc.entries {
+		if strings.HasPrefix(key, prefix) {
+			pc.lru.Remove(el)
+			delete(pc.entries, key)
+		}
+	}
+}
+
+func (pc *planCache) len() int {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return pc.lru.Len()
+}
+
+// planCacheDBPrefix scopes keys to a database on every branch.
+func planCacheDBPrefix(db string) string {
+	return strconv.Quote(db) + "\x00"
+}
+
+// planCacheCollectionPrefix scopes keys to one collection on one branch.
+func planCacheCollectionPrefix(db, rootish, coll string) string {
+	return planCacheDBPrefix(db) + strconv.Quote(rootish) + "\x00" + strconv.Quote(coll) + "\x00"
+}
+
+// planCacheKey identifies params' plan on c. The index fingerprint makes any
+// index change miss every earlier entry.
+func (c *collection) planCacheKey(idxInfos []backends.IndexInfo, params *backends.QueryParams) string {
+	return planCacheCollectionPrefix(c.db.name, c.db.rootish, c.name) + indexFingerprint(idxInfos) + "\x00" + queryShape(params)
+}
+
+// indexFingerprint hashes every index definition and planner-visible flag.
+func indexFingerprint(idxInfos []backends.IndexInfo) string {
+	h := fnv.New128a()
+	for _, idx := range idxInfos {
+		fmt.Fprintf(h, "%q|", idx.Name)
+		for _, kp := range idx.Key {
+			fmt.Fprintf(h, "%q:%+v,", kp.Field, kp)
+		}
+		fmt.Fprintf(h, "|%t|%t|%t|%t|%t|", idx.Unique, idx.Sparse, idx.Hidden, idx.Lossy, idx.Multikey)
+		if idx.PartialFilterExpression != nil {
+			var b strings.Builder
+			writeFilterShape(&b, idx.PartialFilterExpression)
+			fmt.Fprintf(h, "%s%v", b.String(), idx.PartialFilterExpression)
+		}
+		fmt.Fprintf(h, "|%s\n", collation.Parse(idx.Collation).Identity())
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
 }

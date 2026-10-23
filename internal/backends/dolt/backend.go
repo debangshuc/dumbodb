@@ -272,6 +272,8 @@ type Backend struct {
 	droppedGCDone   chan struct{}
 	droppedGCPeriod time.Duration
 	droppedGCTTL    time.Duration
+
+	planCache planCache
 }
 
 func docLocksKey(db, branch string) string {
@@ -762,6 +764,7 @@ func (b *Backend) dropDatabaseLocked(params *backends.DropDatabaseParams) error 
 	if !backends.ValidDatabaseDirName(params.Name) {
 		return backends.NewError(backends.ErrorCodeDatabaseNameIsInvalid, fmt.Errorf("invalid database name %q", params.Name))
 	}
+	defer b.planCache.clearPrefix(planCacheDBPrefix(params.Name))
 	dbDir := filepath.Join(b.dataDir, params.Name)
 
 	existing, err := b.differentlyCasedDatabase(params.Name)

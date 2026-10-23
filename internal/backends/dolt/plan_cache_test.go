@@ -15,6 +15,8 @@
 package dolt
 
 import (
+	"context"
+	"strconv"
 	"testing"
 
 	"github.com/dolthub/dumbodb/internal/backends"
@@ -90,5 +92,108 @@ func TestQueryShape(t *testing.T) {
 	}
 	if a, b := shape(or(int32(1))), shape(or("x")); a == b {
 		t.Errorf("$or branch value classes differ: both %q", a)
+	}
+}
+
+func TestPlanCacheLRU(t *testing.T) {
+	var pc planCache
+	pc.put("a", planCacheEntry{walkIndex: "k"})
+	pc.put("b", planCacheEntry{})
+	if e, ok := pc.get("a"); !ok || e.walkIndex != "k" {
+		t.Fatalf("get a = %v, %v", e, ok)
+	}
+	pc.evict("a")
+	if _, ok := pc.get("a"); ok {
+		t.Fatal("evicted entry still cached")
+	}
+	pc.put("p\x00x", planCacheEntry{})
+	pc.put("p\x00y", planCacheEntry{})
+	pc.clearPrefix("p\x00")
+	if pc.len() != 1 {
+		t.Fatalf("after clearPrefix %d entries, want only b", pc.len())
+	}
+	for i := 0; i < planCacheMaxEntries+5; i++ {
+		pc.put(string(rune('A'+i%26))+strconv.Itoa(i), planCacheEntry{})
+	}
+	if pc.len() != planCacheMaxEntries {
+		t.Fatalf("%d entries, want the bound %d", pc.len(), planCacheMaxEntries)
+	}
+	if _, ok := pc.get("b"); ok {
+		t.Fatal("least recently used entry survived past the bound")
+	}
+}
+
+func TestPlanCacheSkipsTheTrial(t *testing.T) {
+	b, _ := newSortVsFilterBackend(t, 3000)
+	c := rawCollection(b, "idxdb", "tests")
+	doc := func(pairs ...any) *types.Document { return must.NotFail(types.NewDocument(pairs...)) }
+	examined := func(params *backends.QueryParams) (keys, docs int64, walked bool) {
+		t.Helper()
+		k0, d0 := queryExecutorCounters.keys.Load(), queryExecutorCounters.docs.Load()
+		res, err := c.Query(context.Background(), params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := int64(0); i < 5; i++ {
+			if _, _, err := res.Iter.Next(); err != nil {
+				break
+			}
+		}
+		res.Iter.Close()
+		return queryExecutorCounters.keys.Load() - k0, queryExecutorCounters.docs.Load() - d0, res.Sorted
+	}
+
+	unselective := func(p int32) *backends.QueryParams {
+		return &backends.QueryParams{Filter: doc("p", p), Sort: sortOn("k", 1), LimitHint: 5}
+	}
+	firstKeys, _, walked := examined(unselective(1))
+	if !walked || b.planCache.len() != 1 {
+		t.Fatalf("first query walked = %v with %d cache entries; want a walk recorded", walked, b.planCache.len())
+	}
+	keys, _, walked := examined(unselective(2))
+	if !walked {
+		t.Fatal("cached walk not taken")
+	}
+	if keys >= firstKeys || keys > 20 {
+		t.Fatalf("cached walk examined %d keys (trial run %d); want only the walk's few", keys, firstKeys)
+	}
+
+	moderate := func(q int32) *backends.QueryParams {
+		return &backends.QueryParams{Filter: doc("q", doc("$lt", q)), Sort: sortOn("k", 1)}
+	}
+	if _, _, walked := examined(moderate(300)); walked || b.planCache.len() != 2 {
+		t.Fatalf("filter-won trial walked = %v with %d cache entries; want the filter recorded", walked, b.planCache.len())
+	}
+	keys, docs, walked := examined(moderate(250))
+	if walked || keys != 249 || docs != 249 {
+		t.Fatalf("cached filter plan examined %d keys, %d docs (walked %v); want only the filter's 249", keys, docs, walked)
+	}
+
+	ctx := context.Background()
+	_, _, state, err := c.getMap(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	infos, _, err := resolveIndexes(ctx, c, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := c.planCacheKey(infos, moderate(1))
+	if _, err := c.CreateIndexes(ctx, &backends.CreateIndexesParams{Indexes: []backends.IndexInfo{{Name: "pq", Key: []backends.IndexKeyPair{{Field: "p"}, {Field: "q"}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	infos, _, err = resolveIndexes(ctx, c, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.planCacheKey(infos, moderate(1)) == before {
+		t.Fatal("creating an index left the cache key unchanged")
+	}
+
+	if err := c.db.DropCollection(ctx, &backends.DropCollectionParams{Name: "tests"}); err != nil {
+		t.Fatal(err)
+	}
+	if n := b.planCache.len(); n != 0 {
+		t.Fatalf("%d cache entries survive dropping the collection", n)
 	}
 }
