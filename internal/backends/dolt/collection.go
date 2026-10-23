@@ -169,7 +169,7 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 		}
 		if plan != nil {
 			if reverse, ok := indexScanSortOrder(plan.info, params.Filter, params.Sort, params.Collation); fieldSort && ok {
-				return &backends.QueryResult{Iter: plan.sortedIter(ctx, state, m, params.Sort, reverse), Sorted: true}, nil
+				return &backends.QueryResult{Iter: plan.sortedIter(ctx, state, m, params.Sort, reverse, params.Fields), Sorted: true}, nil
 			}
 			if hit && filterPlanWorks(plan, params) > cached.budget(params) {
 				c.db.backend.planCache.evict(cacheKey)
@@ -189,7 +189,7 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 				}
 			}
 			if pos, ok := indexKeySortPosition(plan.info, params.Filter, params.Sort, params.Collation); fieldSort && ok {
-				iter, err := plan.keySortedIter(ctx, state, m, params.Sort, pos)
+				iter, err := plan.keySortedIter(ctx, state, m, params.Sort, pos, params.Fields)
 				if err != nil {
 					return nil, err
 				}
@@ -2984,7 +2984,7 @@ func scanDistinctFromIndex(
 		idBytes := make([]byte, primaryIDLen)
 		copy(idBytes, composite[idStart:])
 
-		doc, err := lookupDocFromPrimary(ctx, primary, ns, idBytes)
+		doc, err := lookupDocFromPrimary(ctx, primary, ns, idBytes, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -3000,12 +3000,13 @@ func scanDistinctFromIndex(
 }
 
 // lookupDocFromPrimary fetches the primary document by encoded _id bytes, or
-// nil if it does not exist.
+// nil if it does not exist, keeping only fields when it is non-nil.
 func lookupDocFromPrimary(
 	ctx context.Context,
 	primary prolly.Map,
 	ns tree.NodeStore,
 	idBytes []byte,
+	fields []string,
 ) (*types.Document, error) {
 	key, err := buildKey(idBytes)
 	if err != nil {
@@ -3018,12 +3019,12 @@ func lookupDocFromPrimary(
 			return nil
 		}
 		countDocsExamined(1)
-		d, decErr := readDocFromValue(ctx, ns, v)
-		if decErr != nil {
-			return decErr
+		stored, err := getBSONStoredBytes(ctx, ns, v)
+		if err != nil {
+			return err
 		}
-		doc = d
-		return nil
+		doc, err = bsonToDocFields(stored, fields)
+		return err
 	}); err != nil {
 		return nil, fmt.Errorf("distinct scan primary fetch: %w", err)
 	}

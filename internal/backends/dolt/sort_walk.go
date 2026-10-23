@@ -113,6 +113,7 @@ func (c *collection) trySortWalk(ctx context.Context, state *dbState, primary pr
 		entries: mapIter,
 		path:    path,
 		order:   types.Ascending,
+		fields:  params.Fields,
 	}
 	if !ascending {
 		it.order = types.Descending
@@ -290,6 +291,7 @@ type sortWalkIter struct {
 	entries prolly.MapIter
 	path    types.Path
 	order   types.SortType
+	fields  []string
 	seen    map[string]struct{}
 	peeked  *sortWalkEntry
 	pending []*types.Document
@@ -342,7 +344,7 @@ func (it *sortWalkIter) fetch(e *sortWalkEntry) (*types.Document, error) {
 		}
 		it.seen[string(e.id)] = struct{}{}
 	}
-	doc, err := lookupDocFromPrimary(it.ctx, it.primary, it.ns, e.id)
+	doc, err := lookupDocFromPrimary(it.ctx, it.primary, it.ns, e.id, it.fields)
 	if err != nil || doc == nil {
 		return nil, err
 	}
@@ -426,15 +428,15 @@ func (it *sortWalkIter) Close() {
 // sortedIter fetches the plan's documents lazily in index order, or reversed,
 // for a scan indexScanSortOrder found to yield sort order, so a downstream
 // limit stops the fetches.
-func (plan *indexLookupPlan) sortedIter(ctx context.Context, state *dbState, primary prolly.Map, sortDoc *types.Document, reverse bool) types.DocumentsIterator {
-	return newPlanSortedIter(ctx, state, primary, plan.ids, sortDoc, reverse)
+func (plan *indexLookupPlan) sortedIter(ctx context.Context, state *dbState, primary prolly.Map, sortDoc *types.Document, reverse bool, fields []string) types.DocumentsIterator {
+	return newPlanSortedIter(ctx, state, primary, plan.ids, sortDoc, reverse, fields)
 }
 
 // keySortedIter yields the plan's documents in sortDoc's order by sorting its
 // entries on their encoded value at index position pos, so a document is
 // fetched only when read. An entry whose values do not split is ordered by its
 // fetched document's value, encoded the same way.
-func (plan *indexLookupPlan) keySortedIter(ctx context.Context, state *dbState, primary prolly.Map, sortDoc *types.Document, pos int) (types.DocumentsIterator, error) {
+func (plan *indexLookupPlan) keySortedIter(ctx context.Context, state *dbState, primary prolly.Map, sortDoc *types.Document, pos int, fields []string) (types.DocumentsIterator, error) {
 	path := must.NotFail(types.NewPathFromString(sortDoc.Keys()[0]))
 	sortKeys := make([][]byte, len(plan.ids))
 	for i, values := range plan.values {
@@ -442,7 +444,7 @@ func (plan *indexLookupPlan) keySortedIter(ctx context.Context, state *dbState, 
 			sortKeys[i] = split[pos]
 			continue
 		}
-		doc, err := lookupDocFromPrimary(ctx, primary, state.ns, plan.ids[i])
+		doc, err := lookupDocFromPrimary(ctx, primary, state.ns, plan.ids[i], fields)
 		if err != nil {
 			return nil, err
 		}
@@ -459,12 +461,12 @@ func (plan *indexLookupPlan) keySortedIter(ctx context.Context, state *dbState, 
 	for i, o := range order {
 		ids[i] = plan.ids[o]
 	}
-	return newPlanSortedIter(ctx, state, primary, ids, sortDoc, !sortDirectionAscending(sortDoc)), nil
+	return newPlanSortedIter(ctx, state, primary, ids, sortDoc, !sortDirectionAscending(sortDoc), fields), nil
 }
 
 // newPlanSortedIter yields the documents of ids, which are in ascending sort
 // order, in sortDoc's order: backward when reverse.
-func newPlanSortedIter(ctx context.Context, state *dbState, primary prolly.Map, ids [][]byte, sortDoc *types.Document, reverse bool) types.DocumentsIterator {
+func newPlanSortedIter(ctx context.Context, state *dbState, primary prolly.Map, ids [][]byte, sortDoc *types.Document, reverse bool, fields []string) types.DocumentsIterator {
 	if reverse {
 		ids = slices.Clone(ids)
 		slices.Reverse(ids)
@@ -476,6 +478,7 @@ func newPlanSortedIter(ctx context.Context, state *dbState, primary prolly.Map, 
 		ids:     ids,
 		path:    must.NotFail(types.NewPathFromString(sortDoc.Keys()[0])),
 		order:   types.Ascending,
+		fields:  fields,
 	}
 	if !sortDirectionAscending(sortDoc) {
 		it.order = types.Descending
@@ -495,6 +498,7 @@ type planSortedIter struct {
 	ids     [][]byte
 	path    types.Path
 	order   types.SortType
+	fields  []string
 	peeked  *types.Document
 	pending []*types.Document
 	release func()
@@ -509,7 +513,7 @@ func (it *planSortedIter) nextFetched() (*types.Document, error) {
 	for len(it.ids) > 0 {
 		id := it.ids[0]
 		it.ids = it.ids[1:]
-		doc, err := lookupDocFromPrimary(it.ctx, it.primary, it.ns, id)
+		doc, err := lookupDocFromPrimary(it.ctx, it.primary, it.ns, id, it.fields)
 		if err != nil {
 			return nil, err
 		}
