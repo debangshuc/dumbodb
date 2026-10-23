@@ -313,4 +313,3 @@ func KeyDescriptor() *val.TupleDesc {
 func ValDescriptor() *val.TupleDesc {
 	return idxValDesc
 }
-
