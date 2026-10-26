@@ -1332,13 +1332,13 @@ func partialFilterScalar(v any) (any, bool) {
 }
 
 // filterImpliesPartial reports whether filter guarantees every
-// condition in a partial index's filter expression pfe: each
-// {field: scalar} (or {field: {$eq: scalar}}) in pfe must appear as the
-// identical scalar equality in filter. Only scalar-equality partial
-// conditions are recognized; any other shape yields false, leaving the
-// index unused (a sound collection scan). When true, every document
-// matching filter lies within the partial index, so scanning the index
-// and re-filtering is sound.
+// condition in a partial index's filter expression pfe. A scalar equality in
+// pfe must appear as the identical equality in filter; a numeric or string
+// range in pfe ($gt, $gte, $lt, $lte) must have each bound implied by a bound
+// in the same direction, or an equality, on the same field in filter. Any
+// other shape yields false, leaving the index unused (a sound collection
+// scan). When true, every document matching filter lies within the partial
+// index, so scanning the index and re-filtering is sound.
 func filterImpliesPartial(filter, pfe *types.Document) bool {
 	if pfe == nil || pfe.Len() == 0 {
 		return true
@@ -1351,16 +1351,132 @@ func filterImpliesPartial(filter, pfe *types.Document) bool {
 		if err != nil {
 			return false
 		}
-		ps, ok := partialFilterScalar(pv)
-		if !ok {
-			return false
-		}
 		fv, err := filter.Get(pk)
 		if err != nil {
 			return false
 		}
-		fs, ok := partialFilterScalar(fv)
-		if !ok || compareScalars(ps, fs) != 0 {
+		if ps, ok := partialFilterScalar(pv); ok {
+			fs, ok := partialFilterScalar(fv)
+			if !ok || compareScalars(ps, fs) != 0 {
+				return false
+			}
+			continue
+		}
+		pr, ok := parseScalarRange(pv)
+		if !ok {
+			return false
+		}
+		fr, ok := parseScalarRange(fv)
+		if !ok || !fr.within(pr) {
+			return false
+		}
+	}
+	return true
+}
+
+// scalarRange is a condition's bounds on one field; an equality has both,
+// inclusive and equal.
+type scalarRange struct {
+	lo, hi                   any
+	hasLo, hasHi             bool
+	loInclusive, hiInclusive bool
+}
+
+// parseScalarRange reads a bare number or string, or an operator document of
+// $eq, $gt, $gte, $lt and $lte over numbers or strings, as bounds.
+func parseScalarRange(v any) (scalarRange, bool) {
+	var r scalarRange
+	if !rangeComparable(v) {
+		doc, ok := v.(*types.Document)
+		if !ok || doc.Len() == 0 {
+			return r, false
+		}
+		first := must.NotFail(doc.Get(doc.Keys()[0]))
+		for _, op := range doc.Keys() {
+			ov := must.NotFail(doc.Get(op))
+			if !rangeComparable(ov) || !sameRangeBracket(ov, first) {
+				return r, false
+			}
+			switch op {
+			case "$eq":
+				r.setLo(ov, true)
+				r.setHi(ov, true)
+			case "$gt":
+				r.setLo(ov, false)
+			case "$gte":
+				r.setLo(ov, true)
+			case "$lt":
+				r.setHi(ov, false)
+			case "$lte":
+				r.setHi(ov, true)
+			default:
+				return r, false
+			}
+		}
+		return r, true
+	}
+	r.setLo(v, true)
+	r.setHi(v, true)
+	return r, true
+}
+
+func rangeComparable(v any) bool {
+	switch t := v.(type) {
+	case int32, int64, string:
+		return true
+	case float64:
+		return !math.IsNaN(t)
+	}
+	return false
+}
+
+func sameRangeBracket(a, b any) bool {
+	_, aStr := a.(string)
+	_, bStr := b.(string)
+	return aStr == bStr
+}
+
+// setLo keeps the tighter of the current and the given lower bound.
+func (r *scalarRange) setLo(v any, inclusive bool) {
+	if r.hasLo {
+		c := compareScalars(v, r.lo)
+		if c < 0 || (c == 0 && inclusive) {
+			return
+		}
+	}
+	r.lo, r.loInclusive, r.hasLo = v, inclusive, true
+}
+
+// setHi keeps the tighter of the current and the given upper bound.
+func (r *scalarRange) setHi(v any, inclusive bool) {
+	if r.hasHi {
+		c := compareScalars(v, r.hi)
+		if c > 0 || (c == 0 && inclusive) {
+			return
+		}
+	}
+	r.hi, r.hiInclusive, r.hasHi = v, inclusive, true
+}
+
+// within reports whether every value r admits is admitted by outer. Each bound
+// is checked on its own, which also holds for array fields, where each bound
+// may be met by a different element.
+func (r scalarRange) within(outer scalarRange) bool {
+	if outer.hasLo {
+		if !r.hasLo || !sameRangeBracket(r.lo, outer.lo) {
+			return false
+		}
+		c := compareScalars(r.lo, outer.lo)
+		if c < 0 || (c == 0 && r.loInclusive && !outer.loInclusive) {
+			return false
+		}
+	}
+	if outer.hasHi {
+		if !r.hasHi || !sameRangeBracket(r.hi, outer.hi) {
+			return false
+		}
+		c := compareScalars(r.hi, outer.hi)
+		if c > 0 || (c == 0 && r.hiInclusive && !outer.hiInclusive) {
 			return false
 		}
 	}
