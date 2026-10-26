@@ -801,7 +801,10 @@ func multikeyScanBound(v any) any {
 	lower := types.MakeDocument(2)
 	for _, op := range opDoc.Keys() {
 		if op == "$gt" || op == "$gte" {
-			lower.Set(op, must.NotFail(opDoc.Get(op)))
+			// AppendDecoded: the operand may be a collated sort key
+			// (idxpkg.PreEncoded), an internal planner value.
+			v, _ := opDoc.Get(op)
+			lower.AppendDecoded(op, v)
 		}
 	}
 	return lower
@@ -1044,9 +1047,30 @@ func compoundIndexBounds(idx backends.IndexInfo, filter *types.Document, queryCm
 	return nil, nil, false
 }
 
-// compareScalars returns -1 / 0 / 1 using types.Compare. Used to merge
-// multiple bounds on the same side ($gte:1, $gte:5 -> keep the tighter 5).
+// compareScalars returns -1 / 0 / 1 used to merge multiple bounds on the
+// same side ($gte:1, $gte:5 -> keep the tighter 5). Two collated operands
+// compare by their sort-key bytes: the keys are defined to sort bytewise
+// exactly like the index orders them (collation.Comparator.Key).
+//
+// A mixed pair can occur legitimately: collateFilterValue rewrites only the
+// string operands of an operator document, so {$gte: 5, $gt: "s090"} under a
+// collated query reaches the lower-bound merge as (PreEncoded, int32) or
+// vice versa. Sort keys carry string type order, so compare the collated
+// side against an empty-string surrogate: types.Compare orders by BSON type
+// order before value, reproducing the un-collated cross-type merge exactly.
+// Two strings in a mixed pair are impossible (strings are always collated
+// together), and a string surrogate would still order deterministically.
 func compareScalars(a, b any) int {
+	pa, aKey := a.(idxpkg.PreEncoded)
+	pb, bKey := b.(idxpkg.PreEncoded)
+	switch {
+	case aKey && bKey:
+		return bytes.Compare(pa, pb)
+	case aKey:
+		return types.Compare("", b)
+	case bKey:
+		return types.Compare(a, "")
+	}
 	switch types.Compare(a, b) {
 	case types.Less:
 		return -1
@@ -1882,10 +1906,12 @@ func collateFilterValue(v any, cmp *collation.Comparator) any {
 		for _, k := range t.Keys() {
 			ov, _ := t.Get(k)
 			if str, ok := ov.(string); ok {
-				out.Set(k, idxpkg.PreEncoded(cmp.Key(str)))
-			} else {
-				out.Set(k, ov)
+				ov = idxpkg.PreEncoded(cmp.Key(str))
 			}
+			// AppendDecoded: a collated filter's operand is an internal
+			// planner artifact (idxpkg.PreEncoded) that never enters
+			// user-visible BSON, and only trusted values reach this copy.
+			out.AppendDecoded(k, ov)
 		}
 		return out
 	default:

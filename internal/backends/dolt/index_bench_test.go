@@ -478,6 +478,100 @@ func TestIndexLookup_Bench_Sanity(t *testing.T) {
 	}
 }
 
+// BenchmarkIndexUse_CollatedRange_10K is the collated counterpart of
+// BenchmarkIndexLookup_Range_10K (its name is mandated by issue #130): an
+// fr_CA-collated index on a string field serving a 1%-selectivity operator
+// range queried under the same collation.
+func BenchmarkIndexUse_CollatedRange_10K(b *testing.B) {
+	const n = 10_000
+	lo, hi := "s1000", "s1100" // [s1000, s1100) of s0000..s9999: 1%.
+
+	rangeOp := func() *types.Document {
+		return must.NotFail(types.NewDocument("$gte", lo, "$lt", hi))
+	}
+
+	seedCollatedStrings := func(b *testing.B, collated bool) (backends.Collection, context.Context) {
+		b.Helper()
+		ctx := context.Background()
+		backend := newBenchBackend(b)
+		db, err := backend.Database("collbench")
+		if err != nil {
+			b.Fatalf("Database: %v", err)
+		}
+		coll, err := db.Collection("c")
+		if err != nil {
+			b.Fatalf("Collection: %v", err)
+		}
+		const batch = 1000
+		for off := 0; off < n; off += batch {
+			size := n - off
+			if size > batch {
+				size = batch
+			}
+			docs := make([]*types.Document, 0, size)
+			for j := off; j < off+size; j++ {
+				docs = append(docs, must.NotFail(types.NewDocument(
+					"_id", int32(j),
+					"s", fmt.Sprintf("s%04d", j),
+				)))
+			}
+			if _, err := coll.InsertAll(ctx, &backends.InsertAllParams{Docs: docs}); err != nil {
+				b.Fatalf("InsertAll: %v", err)
+			}
+		}
+		if collated {
+			if _, err := coll.CreateIndexes(ctx, &backends.CreateIndexesParams{
+				Indexes: []backends.IndexInfo{{
+					Name:      "s_coll_idx",
+					Key:       []backends.IndexKeyPair{{Field: "s"}},
+					Collation: must.NotFail(types.NewDocument("locale", "fr_CA")),
+				}},
+			}); err != nil {
+				b.Fatalf("CreateIndexes: %v", err)
+			}
+		}
+		return coll, ctx
+	}
+
+	b.Run("unindexed_scan", func(b *testing.B) {
+		coll, ctx := seedCollatedStrings(b, false)
+		const want = 100 // [s1000, s1100)
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			res, err := coll.Query(ctx, &backends.QueryParams{
+				Filter:    must.NotFail(types.NewDocument("s", rangeOp())),
+				Collated:  true,
+				Collation: must.NotFail(types.NewDocument("locale", "fr_CA")),
+			})
+			if err != nil {
+				b.Fatalf("Query: %v", err)
+			}
+			if got := drainIter(b, res.Iter); got != want {
+				b.Fatalf("unindexed scan returned %d docs, want %d", got, want)
+			}
+		}
+	})
+
+	b.Run("collated_indexed", func(b *testing.B) {
+		coll, ctx := seedCollatedStrings(b, true)
+		const want = 100 // [s1000, s1100)
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			res, err := coll.Query(ctx, &backends.QueryParams{
+				Filter:    must.NotFail(types.NewDocument("s", rangeOp())),
+				Collated:  true,
+				Collation: must.NotFail(types.NewDocument("locale", "fr_CA")),
+			})
+			if err != nil {
+				b.Fatalf("Query: %v", err)
+			}
+			if got := drainIter(b, res.Iter); got != want {
+				b.Fatalf("collated index scan returned %d docs, want %d", got, want)
+			}
+		}
+	})
+}
+
 // Per-insert cost under a unique index must not scale with collection size
 // (P1): the historical implementation scanned and decoded the whole primary
 // per insert batch; the probe implementation does one bounded index read per
