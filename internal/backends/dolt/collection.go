@@ -600,7 +600,7 @@ func planIndexLookupIn(ctx context.Context, primary prolly.Map, idxInfos []backe
 		stopKey      []byte
 		usable       bool
 		// pointRanges, when set, replaces [startKey, stopKey) with one range
-		// per $in value.
+		// per $in value, or the ranges a prefix regex can match.
 		pointRanges [][2][]byte
 	)
 
@@ -623,6 +623,14 @@ func planIndexLookupIn(ctx context.Context, primary prolly.Map, idxInfos []backe
 				chosenMapIdx = entry.mapIdx
 				// Scan the points in key order so ids come back in index order.
 				slices.SortFunc(ranges, func(a, b [2][]byte) int { return bytes.Compare(a[0], b[0]) })
+				pointRanges = ranges
+				usable = true
+				break
+			}
+		}
+		if queryCmp == nil {
+			if ranges, ok := regexPrefixRanges(v); ok {
+				chosenMapIdx = entry.mapIdx
 				pointRanges = ranges
 				usable = true
 				break
@@ -852,6 +860,97 @@ func multikeyScanBound(v any) any {
 		}
 	}
 	return lower
+}
+
+// regexPrefixRanges returns the key ranges a regex given bare or as
+// {$regex, $options} can match: every string starting with the literal prefix
+// the anchored pattern requires, and the stored regex equal to it. It declines
+// when the pattern has no such prefix, does not compile, or has options other
+// than s. The ranges are a superset; the handler applies the regex itself.
+func regexPrefixRanges(v any) ([][2][]byte, bool) {
+	var re types.Regex
+	switch t := v.(type) {
+	case types.Regex:
+		re = t
+	case *types.Document:
+		raw, err := t.Get("$regex")
+		if err != nil {
+			return nil, false
+		}
+		for _, k := range t.Keys() {
+			if k != "$regex" && k != "$options" {
+				return nil, false
+			}
+		}
+		switch r := raw.(type) {
+		case string:
+			re.Pattern = r
+		case types.Regex:
+			re = r
+		default:
+			return nil, false
+		}
+		if opts, err := t.Get("$options"); err == nil {
+			str, isStr := opts.(string)
+			if !isStr || (re.Options != "" && str != "") {
+				return nil, false
+			}
+			re.Options += str
+		}
+	default:
+		return nil, false
+	}
+	if strings.Trim(re.Options, "s") != "" {
+		return nil, false
+	}
+	if _, err := re.Compile(); err != nil {
+		return nil, false
+	}
+	prefix, ok := regexLiteralPrefix(re.Pattern)
+	if !ok {
+		return nil, false
+	}
+	encoded := idxpkg.EncodeValue(prefix)
+	strStart := encoded[:len(encoded)-1]
+	strStop := append(append([]byte(nil), strStart...), 0xFF)
+	return [][2][]byte{
+		{strStart, strStop},
+		{bracketSuffix(idxpkg.LowerBoundInclusive(re)), bracketSuffix(idxpkg.UpperBoundInclusive(re))},
+	}, true
+}
+
+// regexLiteralPrefix returns the non-empty literal text every match of
+// pattern starts with, when pattern is anchored by ^ and has no alternation.
+func regexLiteralPrefix(pattern string) (string, bool) {
+	if !strings.HasPrefix(pattern, "^") || strings.Contains(pattern, "|") {
+		return "", false
+	}
+	runes := []rune(pattern[1:])
+	var lit []rune
+	stop := rune(0)
+	for i := 0; i < len(runes); i++ {
+		c := runes[i]
+		if c == '\\' {
+			if i+1 < len(runes) && strings.ContainsRune(`.^$|?*+()[]{}\/-`, runes[i+1]) {
+				i++
+				lit = append(lit, runes[i])
+				continue
+			}
+			break
+		}
+		if strings.ContainsRune(`.^$?*+()[]{}`, c) {
+			stop = c
+			break
+		}
+		lit = append(lit, c)
+	}
+	if (stop == '?' || stop == '*' || stop == '{') && len(lit) > 0 {
+		lit = lit[:len(lit)-1]
+	}
+	if len(lit) == 0 {
+		return "", false
+	}
+	return string(lit), true
 }
 
 func indexBoundsForFilterValue(v any) (startKey, stopKey []byte, ok bool) {
@@ -1295,7 +1394,9 @@ func pickIndexForFilter(filter *types.Document, idxInfos []backends.IndexInfo, q
 			continue
 		}
 		if _, _, ok := indexBoundsForFilterValue(v); !ok {
-			if _, inOK := indexPointRangesForIn(v); !inOK {
+			_, inOK := indexPointRangesForIn(v)
+			_, regexOK := regexPrefixRanges(v)
+			if !inOK && !(regexOK && queryIdentity == "") {
 				continue
 			}
 		}
