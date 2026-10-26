@@ -121,10 +121,33 @@ func TestCollatedIndexOperatorFilters(t *testing.T) {
 		}
 	})
 
-	// The collation conversion only rewrites string operands: operator
-	// filters on non-string fields pass through unchanged, even when the
-	// query carries a collation spec.
+	// Non-string operator values must pass through the collation conversion
+	// unchanged (collateFilterValue only rewrites string operands). Two
+	// consequences, both asserted at the candidate level drainQuery observes:
+	//
+	// (a) A numeric comparison against the collated field reaches the
+	//     s_idx as a numeric type bracket: every stored s key is a string
+	//     (leading ctype 0x3C) and the numeric bracket lies entirely below
+	//     it, so the candidate set is empty -- and so is the final match
+	//     set under MongoDB's type-bracketed range semantics. Exact at
+	//     both layers.
+	//
+	// (b) Numeric bounds against the binary-indexed field i cannot consult
+	//     i_idx: the identity rule (planIndexLookupIn, collection.go) keeps a
+	//     collated query off collation-mismatched indexes, so the plan is a
+	//     collated scan, which returns the whole collection as candidates
+	//     (no byte prefilter under collation) for the handler re-filter to
+	//     narrow. A full-collection candidate set fails if the planner ever
+	//     regresses into serving a collated query from the binary index:
+	//     byte-range bounds on collation-mismatched indexes are unsound,
+	//     which is why the identity rule exists.
 	t.Run("nonstring_operator_values", func(t *testing.T) {
+		op := must.NotFail(types.NewDocument("$gt", int32(90)))
+		sIDs := lookup(t, must.NotFail(types.NewDocument("s", op)))
+		if len(sIDs) != 0 {
+			t.Errorf("$gt 90 candidates on collated s = %v, want empty (0 docs)", sIDs)
+		}
+
 		if _, err := coll.CreateIndexes(ctx, &backends.CreateIndexesParams{
 			Indexes: []backends.IndexInfo{{
 				Name: "i_idx",
@@ -134,14 +157,10 @@ func TestCollatedIndexOperatorFilters(t *testing.T) {
 			t.Fatalf("CreateIndexes (binary): %v", err)
 		}
 
-		op := must.NotFail(types.NewDocument("$gte", int32(10), "$lt", int32(20)))
-		ids := lookup(t, must.NotFail(types.NewDocument("i", op)))
-		want := make([]int32, 0, 10)
-		for i := int32(10); i < 20; i++ {
-			want = append(want, i)
-		}
-		if len(ids) != 10 || !reflect.DeepEqual(ids, want) {
-			t.Errorf("numeric range under a collated query = %v, want [10..19] (10 docs)", ids)
+		opI := must.NotFail(types.NewDocument("$gte", int32(10), "$lt", int32(20)))
+		iIDs := lookup(t, must.NotFail(types.NewDocument("i", opI)))
+		if len(iIDs) != n {
+			t.Errorf("binary-field numeric range candidates = %d, want %d (whole-collection scan candidates; the collated query must not use the binary index)", len(iIDs), n)
 		}
 	})
 
