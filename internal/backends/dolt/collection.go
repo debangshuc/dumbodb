@@ -1067,9 +1067,23 @@ func compareScalars(a, b any) int {
 	case aKey && bKey:
 		return bytes.Compare(pa, pb)
 	case aKey:
-		return types.Compare("", b)
+		switch types.Compare("", b) {
+		case types.Less:
+			return -1
+		case types.Greater:
+			return 1
+		default:
+			return 0
+		}
 	case bKey:
-		return types.Compare(a, "")
+		switch types.Compare(a, "") {
+		case types.Less:
+			return -1
+		case types.Greater:
+			return 1
+		default:
+			return 0
+		}
 	}
 	switch types.Compare(a, b) {
 	case types.Less:
