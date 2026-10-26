@@ -1889,7 +1889,9 @@ Creates a new server-side database by cloning a remote. Must be run against the
 | `ok` | number | `1` on success |
 
 The clone brings every branch and sets the default branch (`main`) to track
-`origin`; inspect it with `dumboBranch`, not the clone response.
+`origin`; inspect it with `dumboBranch`, not the clone response. When `from` is
+a registered backup's URL, no `origin` is registered and `main` tracks nothing
+(see Notes).
 
 ### Example
 
@@ -1912,9 +1914,10 @@ admin.runCommand({ dumboClone: 1, from: "myorg/orders", as: "orders" })
 | `as` is a reserved name (`admin`, `config`, `local`) | `OperationFailed: dumboClone: "<name>" is a reserved database name` |
 | A database named `as` already exists | `OperationFailed: dumboClone: database "<name>" already exists` |
 | Remote scheme not cloneable | `OperationFailed: dumboClone: unsupported remote scheme "<scheme>"` |
-| `from` is a backup's URL (restore it with `dumboBackup` instead) | `OperationFailed: dumboClone: url "<url>" is already used by backup "<db>.<name>"` |
 
 ### Notes
+
+- `from` may be a backup's URL (a URL in `admin.system.backups`, any database's backup). Such a clone brings the backup's branches but registers no `origin` remote and gives `main` no upstream -- the URL must never become a remote, since the next `dumboBackup sync` would replace its root. `dumboBackup restore` still recreates the whole database, working sets included.
 
 - The clone registers an `origin` remote pointing at `from` and sets the default branch to track `origin/<default>`, matching `git clone`. After a clone, a bare `dumboPush` / `dumboPull` needs no target.
 - Every remote branch is materialized as a local branch and a tracking ref `refs/remotes/origin/<branch>`.

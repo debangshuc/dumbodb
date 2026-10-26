@@ -17,6 +17,7 @@ package dolt
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/ref"
@@ -108,5 +109,94 @@ func TestDumboDBClone_FromFileRemote(t *testing.T) {
 	// Reserved db name is refused.
 	if _, err := b.DumboDBClone(ctx, &backends.CloneParams{From: remoteURL, As: "admin"}); err == nil {
 		t.Error("clone into admin: want error, got nil")
+	}
+}
+
+// A registered backup URL may be cloned, but the clone registers no origin
+// remote and no upstream: the URL stays owned by the backup and a remote
+// there would be destroyed by the next sync.
+func TestDumboDBClone_FromBackupURL(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBackend(t)
+	backupURL := "file://" + filepath.Join(t.TempDir(), "bk")
+
+	insertDoc(t, b, "src", "coll", mustDoc(t, "_id", int64(1), "v", "backed up"))
+	c1 := commitDB(t, b, "src", "c1")
+	if _, err := b.DumboDBBackup(ctx, backupParams("src", "add", "nightly", backupURL)); err != nil {
+		t.Fatalf("backup add: %v", err)
+	}
+	if _, err := b.DumboDBBackup(ctx, backupParams("src", "sync", "nightly", "")); err != nil {
+		t.Fatalf("backup sync: %v", err)
+	}
+
+	res, err := b.DumboDBClone(ctx, &backends.CloneParams{From: backupURL, As: "frombk"})
+	if err != nil {
+		t.Fatalf("clone from backup url: %v", err)
+	}
+	if res.DB != "frombk" {
+		t.Errorf("clone db = %s, want frombk", res.DB)
+	}
+
+	remotes, err := b.DumboDBRemote(ctx, &backends.RemoteParams{DBName: "frombk", Action: "list"})
+	if err != nil {
+		t.Fatalf("remote list on backup clone: %v", err)
+	}
+	if len(remotes.Remotes) != 0 {
+		t.Errorf("backup clone registered remotes: %+v", remotes.Remotes)
+	}
+
+	pull, err := b.getBranchPull(ctx, "frombk", defaultBranch)
+	if err != nil {
+		t.Fatalf("branch pull config: %v", err)
+	}
+	if !pull.empty() {
+		t.Errorf("backup clone configured upstream: %+v", pull)
+	}
+
+	// Branch creation and remote-tracking refs are unchanged.
+	st := mustDB(t, b, "frombk")
+	h, _ := st.doltDB.ResolveCommitRef(ctx, ref.NewBranchRef(defaultBranch))
+	if hh, _ := h.HashOf(); hh.String() != c1 {
+		t.Errorf("frombk refs/heads/main = %s, want c1 %s", hh.String(), c1)
+	}
+	tref, err := st.doltDB.ResolveCommitRef(ctx, ref.NewRemoteRef("origin", defaultBranch))
+	if err != nil {
+		t.Fatalf("resolve tracking ref: %v", err)
+	}
+	if th, _ := tref.HashOf(); th.String() != c1 {
+		t.Errorf("frombk refs/remotes/origin/main = %s, want c1 %s", th.String(), c1)
+	}
+
+	adb, err := b.Database("frombk")
+	if err != nil {
+		t.Fatalf("open frombk: %v", err)
+	}
+	coll, err := adb.Collection("coll")
+	if err != nil {
+		t.Fatalf("open collection: %v", err)
+	}
+	qr, err := coll.Query(ctx, nil)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer qr.Iter.Close()
+	found := false
+	for {
+		_, doc, err := qr.Iter.Next()
+		if errors.Is(err, iterator.ErrIteratorDone) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("iter: %v", err)
+		}
+		if id, _ := doc.Get("_id"); id == int64(1) {
+			if v, _ := doc.Get("v"); v != "backed up" {
+				t.Errorf("cloned doc v = %v, want \"backed up\"", v)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Error("cloned document _id:1 not found in frombk (clone did not materialize data)")
 	}
 }

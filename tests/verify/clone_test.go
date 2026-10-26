@@ -290,4 +290,61 @@ func TestCloneVerify(t *testing.T) {
 		pull := names["main"]["config"].(bson.M)["pull"].(bson.M)
 		assert.Equal(t, "feature", pull["branch"], "main tracks origin/feature, not origin/main")
 	})
+
+	// -------------------------------------------------------------------------
+	// Scenario 10: A registered backup URL may be cloned, but no origin is
+	// registered and main tracks nothing; the URL stays owned by the backup.
+	// -------------------------------------------------------------------------
+	t.Run("Scenario10_CloneFromBackupURL", func(t *testing.T) {
+		bkURL := "file://" + t.TempDir()
+		require.NoError(t, admin.RunCommand(ctx, bson.D{
+			{Key: "dumboBackup", Value: int32(1)}, {Key: "action", Value: "add"},
+			{Key: "db", Value: srcName}, {Key: "name", Value: "snap"}, {Key: "url", Value: bkURL},
+		}).Err())
+		require.NoError(t, admin.RunCommand(ctx, bson.D{
+			{Key: "dumboBackup", Value: int32(1)},
+			{Key: "action", Value: "sync"}, {Key: "db", Value: srcName}, {Key: "name", Value: "snap"},
+		}).Err())
+
+		bkClone := fmt.Sprintf("bkclone%d", rand.Int64N(1_000_000))
+		var res bson.M
+		require.NoError(t, admin.RunCommand(ctx, bson.D{
+			{Key: "dumboClone", Value: int32(1)}, {Key: "from", Value: bkURL}, {Key: "as", Value: bkClone},
+		}).Decode(&res))
+		assert.EqualValues(t, 1, res["ok"])
+		assert.Equal(t, bkClone, res["db"])
+
+		// Cloned data is readable.
+		var doc bson.M
+		require.NoError(t, env.Client.Database(bkClone).Collection("items").FindOne(ctx, bson.D{{Key: "_id", Value: int32(1)}}).Decode(&doc))
+		assert.Equal(t, "alpha", doc["label"])
+
+		// No origin remote was registered and main has no upstream.
+		var remotes bson.M
+		require.NoError(t, env.Client.Database(bkClone).RunCommand(ctx, bson.D{
+			{Key: "dumboRemote", Value: int32(1)}, {Key: "action", Value: "list"},
+		}).Decode(&remotes))
+		assert.Empty(t, remotes["remotes"], "a backup-sourced clone registers no origin")
+		assert.Nil(t, pullEntry(branchEntry(t, env, bkClone, "main")), "cloned main must not track a backup URL")
+
+		// Branch creation and remote-tracking refs are unchanged; even the
+		// branches a backup never registered still came across.
+		names := map[string]bson.M{}
+		var list bson.M
+		require.NoError(t, env.Client.Database(bkClone+"@main").RunCommand(ctx, bson.D{
+			{Key: "dumboBranch", Value: int32(1)}, {Key: "action", Value: "list"},
+		}).Decode(&list))
+		for _, e := range list["branches"].(bson.A) {
+			names[e.(bson.M)["name"].(string)] = e.(bson.M)
+		}
+		assert.Contains(t, names, "origin/main", "the source's main survives as a tracking ref")
+		assert.Contains(t, names, "origin/feature", "the source's other branches survive as tracking refs")
+
+		// The protection holds: that URL still cannot become a remote.
+		err := admin.RunCommand(ctx, bson.D{
+			{Key: "dumboRemote", Value: int32(1)}, {Key: "action", Value: "add"},
+			{Key: "name", Value: "origin"}, {Key: "url", Value: bkURL},
+		}).Err()
+		assert.Error(t, err, "a backup URL must stay unregisterable as a remote")
+	})
 }

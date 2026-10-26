@@ -64,10 +64,12 @@ func (b *Backend) DumboDBClone(ctx context.Context, params *backends.CloneParams
 		return nil, fmt.Errorf("dumboClone: unsupported remote scheme %q; supported schemes: file, http(s), s3, gs, az, oss, oci, git+file/http/https/ssh", ru.Scheme)
 	}
 
-	// The clone registers its source as the origin remote, which a backup URL
-	// may not be; refuse before anything is created.
-	if err = b.checkURLConflict(ctx, "dumboClone", ru.Raw, "", backupsCollection); err != nil {
-		return nil, err
+	// A registered backup URL may be cloned, but it never becomes a remote:
+	// the next backup sync would replace whatever a remote had pushed. The
+	// registration skip below preserves that invariant.
+	backupUsed, err := b.findBackupByURL(ctx, ru.Raw)
+	if err != nil {
+		return nil, fmt.Errorf("dumboClone: %w", err)
 	}
 
 	remoteParams, err := b.remoteDBParams(ru.Scheme)
@@ -184,15 +186,18 @@ func (b *Backend) DumboDBClone(ctx context.Context, params *backends.CloneParams
 
 	// git clone parity: register an origin remote for the source and make main
 	// track the source branch, so push/fetch with no target work on the clone.
-	if _, err := b.DumboDBRemote(ctx, &backends.RemoteParams{DBName: params.As, Action: "add", Name: "origin", URL: ru.Raw}); err != nil {
-		return nil, fmt.Errorf("dumboClone: registering origin remote: %w", err)
-	}
-	originName, upstreamBranch := "origin", mainSource
-	if _, err := b.applyBranchConfig(ctx, params.As, defaultBranch, &backends.BranchConfigUpdate{
-		PullRemote: &originName,
-		PullBranch: &upstreamBranch,
-	}); err != nil {
-		return nil, fmt.Errorf("dumboClone: setting upstream for %q: %w", defaultBranch, err)
+	// A backup-sourced clone skips both; its URL must not be a remote.
+	if !backupUsed {
+		if _, err := b.DumboDBRemote(ctx, &backends.RemoteParams{DBName: params.As, Action: "add", Name: "origin", URL: ru.Raw}); err != nil {
+			return nil, fmt.Errorf("dumboClone: registering origin remote: %w", err)
+		}
+		originName, upstreamBranch := "origin", mainSource
+		if _, err := b.applyBranchConfig(ctx, params.As, defaultBranch, &backends.BranchConfigUpdate{
+			PullRemote: &originName,
+			PullBranch: &upstreamBranch,
+		}); err != nil {
+			return nil, fmt.Errorf("dumboClone: setting upstream for %q: %w", defaultBranch, err)
+		}
 	}
 
 	return &backends.CloneResult{

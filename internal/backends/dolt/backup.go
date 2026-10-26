@@ -172,6 +172,26 @@ func configKind(collName string) string {
 	return "remote"
 }
 
+// findBackupByURL returns the backup whose stored url equals url exactly,
+// or nil if no registered backup uses it. Stored urls are parseRemoteURL
+// output, so callers must pass that same normalized form.
+func (b *Backend) findBackupByURL(ctx context.Context, url string) (*types.Document, error) {
+	coll, err := b.adminCollection(backupsCollection)
+	if err != nil {
+		return nil, err
+	}
+	docs, err := queryConfigDocs(ctx, coll, nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, doc := range docs {
+		if u, _ := doc.Get("url"); u == url {
+			return doc, nil
+		}
+	}
+	return nil, nil
+}
+
 func (b *Backend) backupList(ctx context.Context, coll backends.Collection, params *backends.BackupParams) (*backends.BackupResult, error) {
 	docs, err := queryConfigDocs(ctx, coll, must.NotFail(types.NewDocument("db", params.DBName)))
 	if err != nil {
