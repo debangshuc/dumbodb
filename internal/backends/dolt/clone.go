@@ -187,7 +187,7 @@ func (b *Backend) DumboDBClone(ctx context.Context, params *backends.CloneParams
 	// git clone parity: register an origin remote for the source and make main
 	// track the source branch, so push/fetch with no target work on the clone.
 	// A backup-sourced clone skips both; its URL must not be a remote.
-	if !backupUsed {
+	if backupUsed == nil {
 		if _, err := b.DumboDBRemote(ctx, &backends.RemoteParams{DBName: params.As, Action: "add", Name: "origin", URL: ru.Raw}); err != nil {
 			return nil, fmt.Errorf("dumboClone: registering origin remote: %w", err)
 		}
