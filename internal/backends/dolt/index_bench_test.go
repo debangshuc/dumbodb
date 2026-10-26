@@ -16,12 +16,15 @@ package dolt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"testing"
 
 	"github.com/dolthub/dumbodb/internal/backends"
+	"github.com/dolthub/dumbodb/internal/collation"
+	"github.com/dolthub/dumbodb/internal/handler/common"
 	"github.com/dolthub/dumbodb/internal/types"
 	"github.com/dolthub/dumbodb/internal/util/iterator"
 	"github.com/dolthub/dumbodb/internal/util/must"
@@ -482,12 +485,47 @@ func TestIndexLookup_Bench_Sanity(t *testing.T) {
 // BenchmarkIndexLookup_Range_10K (its name is mandated by issue #130): an
 // fr_CA-collated index on a string field serving a 1%-selectivity operator
 // range queried under the same collation.
+//
+// The backend's Query streams candidates: a collated index seek yields the
+// bounds-matched entries, while a collated scan streams the whole collection
+// (the byte prefilter is skipped under collation, collection.go) and the
+// handler's FilterIteratorColl applies the actual filter. measure() below
+// re-filters candidates through the same FilterDocumentColl evaluation so
+// both arms count final matches, while the raw candidate count doubles as
+// the docs-examined signal (10,000 scanned vs 100 sought).
 func BenchmarkIndexUse_CollatedRange_10K(b *testing.B) {
 	const n = 10_000
 	lo, hi := "s1000", "s1100" // [s1000, s1100) of s0000..s9999: 1%.
 
 	rangeOp := func() *types.Document {
 		return must.NotFail(types.NewDocument("$gte", lo, "$lt", hi))
+	}
+	filterDoc := must.NotFail(types.NewDocument("s", rangeOp()))
+	colDoc := must.NotFail(types.NewDocument("locale", "fr_CA"))
+	cmp := collation.Parse(colDoc).Comparator()
+
+	// measure drains one candidate stream, tracking the raw candidate count
+	// and the count that passes the handler's own filter evaluation.
+	measure := func(b *testing.B, iter types.DocumentsIterator) (matched, candidates int) {
+		b.Helper()
+		defer iter.Close()
+		for {
+			_, doc, err := iter.Next()
+			if err != nil {
+				if errors.Is(err, iterator.ErrIteratorDone) {
+					return matched, candidates
+				}
+				b.Fatalf("candidate iter: %v", err)
+			}
+			candidates++
+			ok, err := common.FilterDocumentColl(doc, filterDoc, cmp)
+			if err != nil {
+				b.Fatalf("re-filter: %v", err)
+			}
+			if ok {
+				matched++
+			}
+		}
 	}
 
 	seedCollatedStrings := func(b *testing.B, collated bool) (backends.Collection, context.Context) {
@@ -535,7 +573,7 @@ func BenchmarkIndexUse_CollatedRange_10K(b *testing.B) {
 
 	b.Run("unindexed_scan", func(b *testing.B) {
 		coll, ctx := seedCollatedStrings(b, false)
-		const want = 100 // [s1000, s1100)
+		const want = 100 // final matches in [s1000, s1100)
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			res, err := coll.Query(ctx, &backends.QueryParams{
@@ -546,15 +584,19 @@ func BenchmarkIndexUse_CollatedRange_10K(b *testing.B) {
 			if err != nil {
 				b.Fatalf("Query: %v", err)
 			}
-			if got := drainIter(b, res.Iter); got != want {
-				b.Fatalf("unindexed scan returned %d docs, want %d", got, want)
+			matched, candidates := measure(b, res.Iter)
+			if matched != want {
+				b.Fatalf("unindexed scan matched %d docs, want %d", matched, want)
+			}
+			if candidates != n {
+				b.Fatalf("unindexed collated scan streamed %d candidates, want %d (whole collection: no prefilter under collation)", candidates, n)
 			}
 		}
 	})
 
 	b.Run("collated_indexed", func(b *testing.B) {
 		coll, ctx := seedCollatedStrings(b, true)
-		const want = 100 // [s1000, s1100)
+		const want = 100 // final matches in [s1000, s1100)
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			res, err := coll.Query(ctx, &backends.QueryParams{
@@ -565,8 +607,12 @@ func BenchmarkIndexUse_CollatedRange_10K(b *testing.B) {
 			if err != nil {
 				b.Fatalf("Query: %v", err)
 			}
-			if got := drainIter(b, res.Iter); got != want {
-				b.Fatalf("collated index scan returned %d docs, want %d", got, want)
+			matched, candidates := measure(b, res.Iter)
+			if matched != want {
+				b.Fatalf("collated index scan matched %d docs, want %d", matched, want)
+			}
+			if candidates != want {
+				b.Fatalf("collated index seek streamed %d candidates, want %d (bounds should be tight)", candidates, want)
 			}
 		}
 	})
