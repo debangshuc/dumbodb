@@ -178,7 +178,7 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 			return nil, err
 		}
 		if plan != nil {
-			if reverse, ok := indexScanSortOrder(plan.info, params.Filter, params.Sort, params.Collation); fieldSort && ok {
+			if reverse, ok := indexScanSortOrder(plan.info, params.Filter, params.Sort, params.Collation); fieldSort && !plan.union && ok {
 				return &backends.QueryResult{Iter: plan.sortedIter(ctx, state, m, params.Sort, reverse, params.Fields), Sorted: true}, nil
 			}
 			if hit && filterPlanWorks(plan, params) > cached.budget(params) {
@@ -198,7 +198,7 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 					c.db.backend.planCache.put(cacheKey, newPlanCacheEntry(idxInfos, params, "", plan.index, filterPlanWorks(plan, params)))
 				}
 			}
-			if pos, ok := indexKeySortPosition(plan.info, params.Filter, params.Sort, params.Collation); fieldSort && ok {
+			if pos, ok := indexKeySortPosition(plan.info, params.Filter, params.Sort, params.Collation); fieldSort && !plan.union && ok {
 				iter, err := plan.keySortedIter(ctx, state, m, params.Sort, pos, params.Fields)
 				if err != nil {
 					return nil, err
@@ -515,7 +515,7 @@ type indexLookupPlan struct {
 	info  backends.IndexInfo
 	index string
 	// union is set when ids are the union of one index scan per $or branch;
-	// info and index are then empty.
+	// info and index are then empty, and ids are not in any index order.
 	union bool
 	// keys is the number of index entries scanned; ids holds each matched
 	// document once and, when kept, values its entry's encoded index values.
@@ -677,7 +677,7 @@ func chooseIndexRange(idxInfos []backends.IndexInfo, filter *types.Document, hin
 			continue
 		}
 		partial := idx.PartialFilterExpression != nil
-		if partial && !filterImpliesPartial(filter, idx.PartialFilterExpression) {
+		if partial && !filterImpliesPartial(filter, idx.PartialFilterExpression, collation.Parse(idx.Collation).IsSimple()) {
 			continue
 		}
 		leading := idx.Key[0].Field
@@ -1363,13 +1363,15 @@ func partialFilterScalar(v any) (any, bool) {
 
 // filterImpliesPartial reports whether filter guarantees every
 // condition in a partial index's filter expression pfe. A scalar equality in
-// pfe must appear as the identical equality in filter; a numeric or string
-// range in pfe ($gt, $gte, $lt, $lte) must have each bound implied by a bound
-// in the same direction, or an equality, on the same field in filter. Any
+// pfe must appear as the identical equality in filter; a numeric range in pfe
+// ($gt, $gte, $lt, $lte), or a string range when stringRanges (the index is
+// binary-collated, so bounds compare bytewise), must have each bound implied
+// by a bound in the same direction, or an equality, on the same field in
+// filter. Any
 // other shape yields false, leaving the index unused (a sound collection
 // scan). When true, every document matching filter lies within the partial
 // index, so scanning the index and re-filtering is sound.
-func filterImpliesPartial(filter, pfe *types.Document) bool {
+func filterImpliesPartial(filter, pfe *types.Document, stringRanges bool) bool {
 	if pfe == nil || pfe.Len() == 0 {
 		return true
 	}
@@ -1393,7 +1395,7 @@ func filterImpliesPartial(filter, pfe *types.Document) bool {
 			continue
 		}
 		pr, ok := parseScalarRange(pv)
-		if !ok {
+		if !ok || (!stringRanges && pr.hasString()) {
 			return false
 		}
 		fr, ok := parseScalarRange(fv)
@@ -1448,6 +1450,12 @@ func parseScalarRange(v any) (scalarRange, bool) {
 	r.setLo(v, true)
 	r.setHi(v, true)
 	return r, true
+}
+
+func (r scalarRange) hasString() bool {
+	_, lo := r.lo.(string)
+	_, hi := r.hi.(string)
+	return lo || hi
 }
 
 func rangeComparable(v any) bool {
@@ -1559,7 +1567,7 @@ func pickIndexForFilter(filter *types.Document, idxInfos []backends.IndexInfo, q
 				continue
 			}
 			partial := idx.PartialFilterExpression != nil
-			if partial && !filterImpliesPartial(filter, idx.PartialFilterExpression) {
+			if partial && !filterImpliesPartial(filter, idx.PartialFilterExpression, collation.Parse(idx.Collation).IsSimple()) {
 				continue
 			}
 			rank := indexRank(len(idx.Key) > 1, partial)
@@ -3012,7 +3020,7 @@ func (c *collection) tryIndexedCount(ctx context.Context, state *dbState, filter
 		if idx.Lossy {
 			continue
 		}
-		if idx.PartialFilterExpression != nil && !filterImpliesPartial(filter, idx.PartialFilterExpression) {
+		if idx.PartialFilterExpression != nil && !filterImpliesPartial(filter, idx.PartialFilterExpression, collation.Parse(idx.Collation).IsSimple()) {
 			continue
 		}
 		if collation.Parse(idx.Collation).Identity() != queryIdentity {

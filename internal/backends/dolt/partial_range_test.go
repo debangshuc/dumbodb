@@ -54,7 +54,27 @@ func TestFilterImpliesPartialRange(t *testing.T) {
 		{"scalar equality", doc("grp", int32(5)), doc("grp", int32(5)), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := filterImpliesPartial(tc.filter, tc.pfe); got != tc.want {
+			if got := filterImpliesPartial(tc.filter, tc.pfe, true); got != tc.want {
+				t.Fatalf("filterImpliesPartial(%v, %v) = %v, want %v", tc.filter, tc.pfe, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFilterImpliesPartialCollatedStringRange(t *testing.T) {
+	doc := func(pairs ...any) *types.Document { return must.NotFail(types.NewDocument(pairs...)) }
+	for _, tc := range []struct {
+		name   string
+		filter *types.Document
+		pfe    *types.Document
+		want   bool
+	}{
+		{"string range", doc("s", doc("$lt", "Z")), doc("s", doc("$lt", "a")), false},
+		{"numeric range", doc("grp", doc("$lt", int32(50))), doc("grp", doc("$lt", int32(100))), true},
+		{"string equality", doc("s", "a"), doc("s", "a"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := filterImpliesPartial(tc.filter, tc.pfe, false); got != tc.want {
 				t.Fatalf("filterImpliesPartial(%v, %v) = %v, want %v", tc.filter, tc.pfe, got, tc.want)
 			}
 		})

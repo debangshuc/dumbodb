@@ -43,7 +43,7 @@ func TestRegexLiteralPrefix(t *testing.T) {
 		{`^ab\d`, "ab", true},
 		{"^ab(c)", "ab", true},
 		{"^ab[cd]", "ab", true},
-		{"^été", "été", true},
+		{"^\303\251t\303\251", "\303\251t\303\251", true},
 		{"abc", "", false},
 		{"^", "", false},
 		{"^.abc", "", false},
