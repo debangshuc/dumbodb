@@ -3160,12 +3160,29 @@ func (c *collection) DistinctScan(ctx context.Context, params *backends.Distinct
 		return nil, err
 	}
 
+	var start, stop []byte
+	if params.Filter != nil {
+		if params.Filter.Len() != 1 || params.Filter.Keys()[0] != params.Key || strings.Contains(params.Key, ".") {
+			return nil, nil
+		}
+		var ok bool
+		if start, stop, ok = indexBoundsForFilterValue(must.NotFail(params.Filter.Get(params.Key))); !ok {
+			return nil, nil
+		}
+	}
+
 	var (
 		idxMap prolly.Map
 		found  bool
 	)
 	for i, idx := range idxInfos {
 		if len(idx.Key) != 1 {
+			continue
+		}
+		// A filtered scan bounds array elements one at a time, while a matched
+		// document contributes all of its elements; a hidden index serves no
+		// query.
+		if params.Filter != nil && (idx.Multikey || idx.Hidden) {
 			continue
 		}
 		// Lossy indexes hold entries at wrong byte positions (and the
@@ -3201,7 +3218,7 @@ func (c *collection) DistinctScan(ctx context.Context, params *backends.Distinct
 		return nil, nil
 	}
 
-	values, err := scanDistinctFromIndex(ctx, idxMap, m, state.ns, params.Key)
+	values, err := scanDistinctFromIndex(ctx, idxMap, m, state.ns, params.Key, start, stop, params.Filter)
 	if err != nil {
 		return nil, err
 	}
@@ -3215,13 +3232,17 @@ func (c *collection) DistinctScan(ctx context.Context, params *backends.Distinct
 // KeyString prefix share a distinct value, so a single doc fetch per group
 // suffices to recover the original typed value. Each fetched doc contributes
 // its MongoDB index keys, including null for a missing field and undefined for
-// an empty array, as MongoDB's DISTINCT_SCAN does.
+// an empty array, as MongoDB's DISTINCT_SCAN does. Only entries in
+// [start, stop) are read, and a group counts only when its fetched document
+// matches filter, when set.
 func scanDistinctFromIndex(
 	ctx context.Context,
 	idxMap prolly.Map,
 	primary prolly.Map,
 	ns tree.NodeStore,
 	field string,
+	start, stop []byte,
+	filter *types.Document,
 ) ([]any, error) {
 	const primaryIDLen = 20
 
@@ -3230,7 +3251,7 @@ func scanDistinctFromIndex(
 		return nil, err
 	}
 
-	iter, err := idxMap.IterAll(ctx)
+	iter, err := idxpkg.IterKeyRange(ctx, idxMap, start, stop)
 	if err != nil {
 		return nil, fmt.Errorf("distinct scan iterating index: %w", err)
 	}
@@ -3281,6 +3302,15 @@ func scanDistinctFromIndex(
 		doc, err := lookupDocFromPrimary(ctx, primary, ns, idBytes, nil)
 		if err != nil {
 			return nil, err
+		}
+		if doc != nil && filter != nil {
+			match, err := backends.MatchPartialFilter(doc, filter)
+			if err != nil {
+				return nil, err
+			}
+			if !match {
+				doc = nil
+			}
 		}
 		if doc != nil {
 			out = append(out, commonpath.IndexKeyValues(doc, path)...)

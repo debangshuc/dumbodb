@@ -427,3 +427,17 @@ func entryPrimaryID(k val.Tuple) ([]byte, bool) {
 	}
 	return bytes.Clone(compositeKey[idStart:]), true
 }
+
+// IterKeyRange iterates the entries in [startKey, stopKey); a nil or empty
+// bound is open on that side.
+func IterKeyRange(ctx context.Context, m prolly.Map, startKey, stopKey []byte) (prolly.MapIter, error) {
+	startTup, err := boundTuple(startKey)
+	if err != nil {
+		return nil, err
+	}
+	stopTup, err := boundTuple(stopKey)
+	if err != nil {
+		return nil, err
+	}
+	return m.IterKeyRange(ctx, startTup, stopTup)
+}
