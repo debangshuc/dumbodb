@@ -497,3 +497,19 @@ func TestStreamSortedRangeCapsOtherPredicates(t *testing.T) {
 		t.Fatalf("narrow range with another predicate: ids %v sorted %v, want a sorted stream from 100", ids, sorted)
 	}
 }
+
+func TestSortWalkSkipsFilteredSortWithoutLimit(t *testing.T) {
+	c := newSortWalkCollection(t, backends.IndexInfo{Name: "k", Key: []backends.IndexKeyPair{{Field: "k"}}},
+		kDoc(1, int32(30)), kDoc(2, int32(10)), kDoc(3, int32(20)),
+	)
+	other := must.NotFail(types.NewDocument("z", int32(1)))
+	if _, sorted := sortWalkQuery(t, c, &backends.QueryParams{Filter: other, Sort: sortOn("k", 1)}); sorted {
+		t.Fatal("a filtered sort without a limit must scan and sort, not walk the index")
+	}
+	if _, sorted := sortWalkQuery(t, c, &backends.QueryParams{Filter: other, Sort: sortOn("k", 1), LimitHint: 2}); !sorted {
+		t.Fatal("a filtered sort with a limit must walk the index")
+	}
+	if _, sorted := sortWalkQuery(t, c, &backends.QueryParams{Sort: sortOn("k", 1)}); !sorted {
+		t.Fatal("an unfiltered sort must walk the index")
+	}
+}

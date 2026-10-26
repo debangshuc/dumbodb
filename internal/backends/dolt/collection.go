@@ -215,7 +215,9 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 		}
 	}
 
-	if !naturalHint && fieldSort {
+	// Without a limit a filtered walk fetches every document by point lookup
+	// to return a fraction of them; the sequential scan and sort is cheaper.
+	if !naturalHint && fieldSort && (params.LimitHint > 0 || params.Filter.Len() == 0) {
 		iter, ok, err := c.trySortWalk(ctx, state, m, params)
 		if err != nil {
 			return nil, err
