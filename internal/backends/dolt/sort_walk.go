@@ -432,9 +432,6 @@ func (it *sortWalkIter) Close() {
 	}
 }
 
-// sortedIter fetches the plan's documents lazily in index order, or reversed,
-// for a scan indexScanSortOrder found to yield sort order, so a downstream
-// limit stops the fetches.
 // tryStreamSortedRange serves a limited single-field sort from the range of
 // the index chosen for the filter when that range is already in sort order,
 // reading index entries and documents only as the limit consumes them.
@@ -446,9 +443,26 @@ func tryStreamSortedRange(ctx context.Context, state *dbState, primary prolly.Ma
 	if !ok || choice.pointRanges != nil {
 		return nil, false, nil
 	}
-	reverse, ok := indexScanSortOrder(idxInfos[choice.mapIdx], params.Filter, params.Sort, params.Collation)
+	info := idxInfos[choice.mapIdx]
+	reverse, ok := indexScanSortOrder(info, params.Filter, params.Sort, params.Collation)
 	if !ok {
 		return nil, false, nil
+	}
+	// A filter field outside the index may reject most of the range, which
+	// the stream would then fetch document by document; past half the
+	// collection the sequential scan is cheaper.
+	if !filterFieldsAreIndexKeys(params.Filter, info) {
+		entries, err := idxpkg.RangeCardinality(ctx, idxMaps[choice.mapIdx], choice.startKey, choice.stopKey)
+		if err != nil {
+			return nil, false, err
+		}
+		docs, err := primary.Count()
+		if err != nil {
+			return nil, false, err
+		}
+		if entries > uint64(docs)/2 {
+			return nil, false, nil
+		}
 	}
 	stream, err := idxpkg.NewRangeIDIter(ctx, idxMaps[choice.mapIdx], choice.startKey, choice.stopKey, reverse)
 	if err != nil {
@@ -467,6 +481,18 @@ func tryStreamSortedRange(ctx context.Context, state *dbState, primary prolly.Ma
 	return it, true, nil
 }
 
+func filterFieldsAreIndexKeys(filter *types.Document, idx backends.IndexInfo) bool {
+	for _, f := range filter.Keys() {
+		if !slices.ContainsFunc(idx.Key, func(k backends.IndexKeyPair) bool { return k.Field == f }) {
+			return false
+		}
+	}
+	return true
+}
+
+// sortedIter fetches the plan's documents lazily in index order, or reversed,
+// for a scan indexScanSortOrder found to yield sort order, so a downstream
+// limit stops the fetches.
 func (plan *indexLookupPlan) sortedIter(ctx context.Context, state *dbState, primary prolly.Map, sortDoc *types.Document, reverse bool, fields []string) types.DocumentsIterator {
 	return newPlanSortedIter(ctx, state, primary, plan.ids, sortDoc, reverse, fields)
 }

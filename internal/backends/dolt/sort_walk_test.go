@@ -472,3 +472,28 @@ func TestIndexKeysSortedBeforeFetch(t *testing.T) {
 		t.Fatal("a filter field outside the index is decided after the fetch; the keys cannot be sorted first")
 	}
 }
+
+func TestStreamSortedRangeCapsOtherPredicates(t *testing.T) {
+	var docs []*types.Document
+	for i := int32(1); i <= 100; i++ {
+		grp := int32(0)
+		if i%4 == 0 {
+			grp = 1
+		}
+		docs = append(docs, must.NotFail(types.NewDocument("_id", i, "grp", grp, "k", i, "odd", i%2 == 1)))
+	}
+	c := newSortWalkCollection(t, backends.IndexInfo{Name: "grp_k", Key: []backends.IndexKeyPair{{Field: "grp"}, {Field: "k"}}}, docs...)
+	query := func(filter *types.Document) ([]int32, bool) {
+		return sortWalkQuery(t, c, &backends.QueryParams{Filter: filter, Sort: sortOn("k", -1), LimitHint: 3})
+	}
+	ids, sorted := query(must.NotFail(types.NewDocument("grp", int32(0))))
+	if !sorted || !slices.Equal(ids[:3], []int32{99, 98, 97}) {
+		t.Fatalf("index-bound filter: ids %v sorted %v, want a sorted stream from 99", ids, sorted)
+	}
+	if _, sorted := query(must.NotFail(types.NewDocument("grp", int32(0), "odd", true))); sorted {
+		t.Fatal("a predicate outside the index over most of the collection must not stream")
+	}
+	if ids, sorted := query(must.NotFail(types.NewDocument("grp", int32(1), "odd", false))); !sorted || !slices.Equal(ids[:3], []int32{100, 96, 92}) {
+		t.Fatalf("narrow range with another predicate: ids %v sorted %v, want a sorted stream from 100", ids, sorted)
+	}
+}

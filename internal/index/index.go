@@ -441,3 +441,17 @@ func IterKeyRange(ctx context.Context, m prolly.Map, startKey, stopKey []byte) (
 	}
 	return m.IterKeyRange(ctx, startTup, stopTup)
 }
+
+// RangeCardinality returns the number of entries in [startKey, stopKey)
+// without reading them; a nil or empty bound is open on that side.
+func RangeCardinality(ctx context.Context, m prolly.Map, startKey, stopKey []byte) (uint64, error) {
+	startTup, err := boundTuple(startKey)
+	if err != nil {
+		return 0, err
+	}
+	stopTup, err := boundTuple(stopKey)
+	if err != nil {
+		return 0, err
+	}
+	return m.GetKeyRangeCardinality(ctx, startTup, stopTup)
+}

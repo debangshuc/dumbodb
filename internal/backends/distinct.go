@@ -14,9 +14,11 @@
 
 package backends
 
-import "github.com/dolthub/dumbodb/internal/types"
+import (
+	"context"
 
-import "context"
+	"github.com/dolthub/dumbodb/internal/types"
+)
 
 // DistinctParams configures DistinctScanner.DistinctScan.
 type DistinctParams struct {
