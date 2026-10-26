@@ -37,11 +37,15 @@ import (
 // sortWalkIndex returns the position in infos of an index whose in-order walk
 // yields sort's order: its leading field is the single sort field, and it is
 // complete (not sparse, partial, or hidden), exact (not lossy, hashed, text, or
-// geo), and binary-collated like the query. sort must hold one non-$natural key.
+// geo), and collated like the query. A collated index must not be multikey: its
+// in-order walk yields a document at its collation-least element, which the
+// in-memory sort does not pick. sort must hold one non-$natural key.
 func sortWalkIndex(infos []backends.IndexInfo, sortDoc *types.Document, queryCollation *types.Document) (int, bool) {
-	if !sortIsSingleField(sortDoc) || !collation.Parse(queryCollation).IsSimple() {
+	if !sortIsSingleField(sortDoc) {
 		return 0, false
 	}
+	queryColl := collation.Parse(queryCollation)
+	queryIdentity := queryColl.Identity()
 	switch must.NotFail(sortDoc.Get(sortDoc.Keys()[0])).(type) {
 	case int32, int64, float64:
 	default:
@@ -59,7 +63,10 @@ func sortWalkIndex(infos []backends.IndexInfo, sortDoc *types.Document, queryCol
 		if idx.Lossy || idx.Sparse || idx.Hidden || idx.PartialFilterExpression != nil {
 			continue
 		}
-		if !collation.Parse(idx.Collation).IsSimple() {
+		if collation.Parse(idx.Collation).Identity() != queryIdentity {
+			continue
+		}
+		if !queryColl.IsSimple() && idx.Multikey {
 			continue
 		}
 		return i, true
@@ -72,7 +79,7 @@ func sortWalkIndex(infos []backends.IndexInfo, sortDoc *types.Document, queryCol
 // the walk. It declines (false) when no index qualifies or when the query is
 // hinted onto another index.
 func (c *collection) trySortWalk(ctx context.Context, state *dbState, primary prolly.Map, params *backends.QueryParams) (*sortWalkIter, bool, error) {
-	if params.Collated || params.OnlyRecordIDs {
+	if (params.Collated && params.Collation == nil) || params.OnlyRecordIDs {
 		return nil, false, nil
 	}
 	state.mu.RLock()
