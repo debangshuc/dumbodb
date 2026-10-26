@@ -435,6 +435,38 @@ func (it *sortWalkIter) Close() {
 // sortedIter fetches the plan's documents lazily in index order, or reversed,
 // for a scan indexScanSortOrder found to yield sort order, so a downstream
 // limit stops the fetches.
+// tryStreamSortedRange serves a limited single-field sort from the range of
+// the index chosen for the filter when that range is already in sort order,
+// reading index entries and documents only as the limit consumes them.
+func tryStreamSortedRange(ctx context.Context, state *dbState, primary prolly.Map, idxInfos []backends.IndexInfo, idxMaps []prolly.Map, params *backends.QueryParams) (types.DocumentsIterator, bool, error) {
+	if params.LimitHint <= 0 || params.Filter == nil || params.Filter.Has("$or") {
+		return nil, false, nil
+	}
+	choice, ok := chooseIndexRange(idxInfos, params.Filter, params.Hint, params.Collation)
+	if !ok || choice.pointRanges != nil {
+		return nil, false, nil
+	}
+	reverse, ok := indexScanSortOrder(idxInfos[choice.mapIdx], params.Filter, params.Sort, params.Collation)
+	if !ok {
+		return nil, false, nil
+	}
+	stream, err := idxpkg.NewRangeIDIter(ctx, idxMaps[choice.mapIdx], choice.startKey, choice.stopKey, reverse)
+	if err != nil {
+		return nil, false, err
+	}
+	it := newPlanSortedIter(ctx, state, primary, nil, params.Sort, false, params.Fields).(*planSortedIter)
+	it.stream = stream
+	if it.release != nil {
+		releasePrimary := it.release
+		releaseIndex := state.backend.backgroundRP.pinRoot(state.name, idxMaps[choice.mapIdx].HashOf())
+		it.release = func() {
+			releasePrimary()
+			releaseIndex()
+		}
+	}
+	return it, true, nil
+}
+
 func (plan *indexLookupPlan) sortedIter(ctx context.Context, state *dbState, primary prolly.Map, sortDoc *types.Document, reverse bool, fields []string) types.DocumentsIterator {
 	return newPlanSortedIter(ctx, state, primary, plan.ids, sortDoc, reverse, fields)
 }
@@ -503,6 +535,7 @@ type planSortedIter struct {
 	ns      tree.NodeStore
 	primary prolly.Map
 	ids     [][]byte
+	stream  *idxpkg.RangeIDIter
 	path    types.Path
 	order   types.SortType
 	fields  []string
@@ -517,9 +550,11 @@ func (it *planSortedIter) nextFetched() (*types.Document, error) {
 		it.peeked = nil
 		return doc, nil
 	}
-	for len(it.ids) > 0 {
-		id := it.ids[0]
-		it.ids = it.ids[1:]
+	for {
+		id, err := it.nextID()
+		if err != nil || id == nil {
+			return nil, err
+		}
 		doc, err := lookupDocFromPrimary(it.ctx, it.primary, it.ns, id, it.fields)
 		if err != nil {
 			return nil, err
@@ -529,7 +564,22 @@ func (it *planSortedIter) nextFetched() (*types.Document, error) {
 			return doc, nil
 		}
 	}
-	return nil, nil
+}
+
+func (it *planSortedIter) nextID() ([]byte, error) {
+	if it.stream != nil {
+		id, err := it.stream.Next(it.ctx)
+		if id != nil {
+			countKeysExamined(1)
+		}
+		return id, err
+	}
+	if len(it.ids) == 0 {
+		return nil, nil
+	}
+	id := it.ids[0]
+	it.ids = it.ids[1:]
+	return id, nil
 }
 
 func (it *planSortedIter) isSubdocument(doc *types.Document) bool {

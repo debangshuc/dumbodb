@@ -163,6 +163,16 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 			hit = false
 		}
 
+		if fieldSort {
+			iter, ok, err := tryStreamSortedRange(ctx, state, m, idxInfos, idxMaps, params)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				return &backends.QueryResult{Iter: iter, Sorted: true}, nil
+			}
+		}
+
 		plan, err := planIndexLookupIn(ctx, m, idxInfos, idxMaps, params.Filter, params.Hint, params.Collation, fieldSort)
 		if err != nil {
 			return nil, err
@@ -542,126 +552,11 @@ func planIndexLookupIn(ctx context.Context, primary prolly.Map, idxInfos []backe
 		return planOrUnion(ctx, primary, idxInfos, idxMaps, must.NotFail(filter.Get("$or")), queryCollation)
 	}
 
-	queryColl := collation.Parse(queryCollation)
-	queryIdentity := queryColl.Identity()
-	queryCmp := queryColl.Comparator()
-
-	// A hint naming a specific index forces selection: only that index is a
-	// candidate, matching what Explain reports (and MongoDB). When the hinted
-	// index does not cover the filter with a usable range, selection falls
-	// through to a collection scan -- results are unaffected either way.
-	hintedName := backends.MatchHintedIndex(hint, idxInfos)
-
-	// Single-field indexes are preferred (tighter scan range); compound
-	// indexes are used when no single-field index covers the leading filter
-	// field. The handler re-filters every returned doc, so a compound index's
-	// suffix-field constraints are applied post-scan.
-	type indexedFieldEntry struct {
-		idxName  string
-		mapIdx   int
-		compound bool
-		rank     int
-	}
-	indexedField := make(map[string]indexedFieldEntry, len(idxInfos))
-	for i, idx := range idxInfos {
-		if hintedName != "" && idx.Name != hintedName {
-			continue
-		}
-		// Lossy entries sit at wrong byte positions; never usable. A partial
-		// index is usable only when the filter implies its partial condition,
-		// so every matching doc lies within it; otherwise it drops non-member
-		// matches. (Sparse is fine: no admitted operator matches a missing field.)
-		if idx.Lossy || len(idx.Key) == 0 || idx.Key[0].Field == "" {
-			continue
-		}
-		if collation.Parse(idx.Collation).Identity() != queryIdentity {
-			continue
-		}
-		partial := idx.PartialFilterExpression != nil
-		if partial && !filterImpliesPartial(filter, idx.PartialFilterExpression) {
-			continue
-		}
-		leading := idx.Key[0].Field
-		isCompound := len(idx.Key) > 1
-		rank := indexRank(isCompound, partial)
-		if cur, have := indexedField[leading]; !have || rank < cur.rank {
-			indexedField[leading] = indexedFieldEntry{
-				idxName: idx.Name, mapIdx: i, compound: isCompound, rank: rank,
-			}
-		}
-	}
-	if len(indexedField) == 0 {
+	choice, ok := chooseIndexRange(idxInfos, filter, hint, queryCollation)
+	if !ok {
 		return nil, nil
 	}
-
-	var (
-		chosenMapIdx int
-		startKey     []byte
-		stopKey      []byte
-		usable       bool
-		// pointRanges, when set, replaces [startKey, stopKey) with one range
-		// per $in value, or the ranges a prefix regex can match.
-		pointRanges [][2][]byte
-	)
-
-	for _, k := range filter.Keys() {
-		// Top-level $-operators ($and/$or/$nor/$comment/...) make the
-		// per-field analysis below unsound  -- bail.
-		if strings.HasPrefix(k, "$") {
-			return nil, nil
-		}
-		entry, ok := indexedField[k]
-		if !ok {
-			continue
-		}
-		v, err := filter.Get(k)
-		if err != nil {
-			continue
-		}
-		if queryCmp == nil && !entry.compound {
-			if ranges, ok := indexPointRangesForIn(v); ok {
-				chosenMapIdx = entry.mapIdx
-				// Scan the points in key order so ids come back in index order.
-				slices.SortFunc(ranges, func(a, b [2][]byte) int { return bytes.Compare(a[0], b[0]) })
-				pointRanges = ranges
-				usable = true
-				break
-			}
-		}
-		if queryCmp == nil {
-			if ranges, ok := regexPrefixRanges(v); ok {
-				chosenMapIdx = entry.mapIdx
-				pointRanges = ranges
-				usable = true
-				break
-			}
-		}
-		if queryCmp != nil {
-			v = collateFilterValue(v, queryCmp)
-		}
-		if idxInfos[entry.mapIdx].Multikey {
-			v = multikeyScanBound(v)
-		}
-		s, e, ok := indexBoundsForFilterValue(v)
-		if !ok {
-			continue
-		}
-		if entry.compound {
-			if cs, ce, cok := compoundIndexBounds(idxInfos[entry.mapIdx], filter, queryCmp); cok {
-				s, e = cs, ce
-			} else {
-				s, e = compoundLeadingBounds(s, e)
-			}
-		}
-		chosenMapIdx = entry.mapIdx
-		startKey, stopKey = s, e
-		usable = true
-		break
-	}
-
-	if !usable {
-		return nil, nil
-	}
+	chosenMapIdx, startKey, stopKey, pointRanges := choice.mapIdx, choice.startKey, choice.stopKey, choice.pointRanges
 
 	idxMap := idxMaps[chosenMapIdx]
 
@@ -732,6 +627,141 @@ func planIndexLookupIn(ctx context.Context, primary prolly.Map, idxInfos []backe
 		}
 	}
 	return plan, nil
+}
+
+// indexRangeChoice is the index chooseIndexRange picked for a filter and the
+// key range, or point ranges, to scan in it.
+type indexRangeChoice struct {
+	mapIdx      int
+	startKey    []byte
+	stopKey     []byte
+	pointRanges [][2][]byte
+}
+
+// chooseIndexRange picks the index serving filter's first indexable field and
+// the range to scan in it, without scanning.
+func chooseIndexRange(idxInfos []backends.IndexInfo, filter *types.Document, hint any, queryCollation *types.Document) (indexRangeChoice, bool) {
+	queryColl := collation.Parse(queryCollation)
+	queryIdentity := queryColl.Identity()
+	queryCmp := queryColl.Comparator()
+
+	// A hint naming a specific index forces selection: only that index is a
+	// candidate, matching what Explain reports (and MongoDB). When the hinted
+	// index does not cover the filter with a usable range, selection falls
+	// through to a collection scan -- results are unaffected either way.
+	hintedName := backends.MatchHintedIndex(hint, idxInfos)
+
+	// Single-field indexes are preferred (tighter scan range); compound
+	// indexes are used when no single-field index covers the leading filter
+	// field. The handler re-filters every returned doc, so a compound index's
+	// suffix-field constraints are applied post-scan.
+	type indexedFieldEntry struct {
+		idxName  string
+		mapIdx   int
+		compound bool
+		rank     int
+	}
+	indexedField := make(map[string]indexedFieldEntry, len(idxInfos))
+	for i, idx := range idxInfos {
+		if hintedName != "" && idx.Name != hintedName {
+			continue
+		}
+		// Lossy entries sit at wrong byte positions; never usable. A partial
+		// index is usable only when the filter implies its partial condition,
+		// so every matching doc lies within it; otherwise it drops non-member
+		// matches. (Sparse is fine: no admitted operator matches a missing field.)
+		if idx.Lossy || len(idx.Key) == 0 || idx.Key[0].Field == "" {
+			continue
+		}
+		if collation.Parse(idx.Collation).Identity() != queryIdentity {
+			continue
+		}
+		partial := idx.PartialFilterExpression != nil
+		if partial && !filterImpliesPartial(filter, idx.PartialFilterExpression) {
+			continue
+		}
+		leading := idx.Key[0].Field
+		isCompound := len(idx.Key) > 1
+		rank := indexRank(isCompound, partial)
+		if cur, have := indexedField[leading]; !have || rank < cur.rank {
+			indexedField[leading] = indexedFieldEntry{
+				idxName: idx.Name, mapIdx: i, compound: isCompound, rank: rank,
+			}
+		}
+	}
+	if len(indexedField) == 0 {
+		return indexRangeChoice{}, false
+	}
+
+	var (
+		chosenMapIdx int
+		startKey     []byte
+		stopKey      []byte
+		usable       bool
+		// pointRanges, when set, replaces [startKey, stopKey) with one range
+		// per $in value, or the ranges a prefix regex can match.
+		pointRanges [][2][]byte
+	)
+
+	for _, k := range filter.Keys() {
+		// Top-level $-operators ($and/$or/$nor/$comment/...) make the
+		// per-field analysis below unsound  -- bail.
+		if strings.HasPrefix(k, "$") {
+			return indexRangeChoice{}, false
+		}
+		entry, ok := indexedField[k]
+		if !ok {
+			continue
+		}
+		v, err := filter.Get(k)
+		if err != nil {
+			continue
+		}
+		if queryCmp == nil && !entry.compound {
+			if ranges, ok := indexPointRangesForIn(v); ok {
+				chosenMapIdx = entry.mapIdx
+				// Scan the points in key order so ids come back in index order.
+				slices.SortFunc(ranges, func(a, b [2][]byte) int { return bytes.Compare(a[0], b[0]) })
+				pointRanges = ranges
+				usable = true
+				break
+			}
+		}
+		if queryCmp == nil {
+			if ranges, ok := regexPrefixRanges(v); ok {
+				chosenMapIdx = entry.mapIdx
+				pointRanges = ranges
+				usable = true
+				break
+			}
+		}
+		if queryCmp != nil {
+			v = collateFilterValue(v, queryCmp)
+		}
+		if idxInfos[entry.mapIdx].Multikey {
+			v = multikeyScanBound(v)
+		}
+		s, e, ok := indexBoundsForFilterValue(v)
+		if !ok {
+			continue
+		}
+		if entry.compound {
+			if cs, ce, cok := compoundIndexBounds(idxInfos[entry.mapIdx], filter, queryCmp); cok {
+				s, e = cs, ce
+			} else {
+				s, e = compoundLeadingBounds(s, e)
+			}
+		}
+		chosenMapIdx = entry.mapIdx
+		startKey, stopKey = s, e
+		usable = true
+		break
+	}
+
+	if !usable {
+		return indexRangeChoice{}, false
+	}
+	return indexRangeChoice{mapIdx: chosenMapIdx, startKey: startKey, stopKey: stopKey, pointRanges: pointRanges}, true
 }
 
 // planOrUnion plans each $or branch on its own index and unions the matched
