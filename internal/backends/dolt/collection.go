@@ -744,6 +744,9 @@ func chooseIndexRange(idxInfos []backends.IndexInfo, filter *types.Document, hin
 			v = multikeyScanBound(v)
 		}
 		s, e, ok := indexBoundsForFilterValue(v)
+		if !ok && isNullEquality(v) && nullEqualityIndexable(idxInfos[entry.mapIdx]) {
+			s, e, ok = idxpkg.LowerBoundInclusive(types.Null), idxpkg.UpperBoundInclusive(types.Null), true
+		}
 		if !ok {
 			continue
 		}
@@ -983,6 +986,30 @@ func regexLiteralPrefix(pattern string) (string, bool) {
 		return "", false
 	}
 	return string(lit), true
+}
+
+// isNullEquality reports whether v, a filter field's condition, is null
+// equality, which matches null and missing values.
+func isNullEquality(v any) bool {
+	if doc, ok := v.(*types.Document); ok {
+		if doc.Len() != 1 || doc.Keys()[0] != "$eq" {
+			return false
+		}
+		v = must.NotFail(doc.Get("$eq"))
+	}
+	switch v.(type) {
+	case nil, types.NullType:
+		return true
+	}
+	return false
+}
+
+// nullEqualityIndexable reports whether idx's null entries are exactly the
+// documents a null equality on its leading field matches: missing values are
+// indexed as null, and no array element or dotted path can match null without
+// a null entry.
+func nullEqualityIndexable(idx backends.IndexInfo) bool {
+	return !idx.Sparse && !idx.Multikey && !strings.Contains(idx.Key[0].Field, ".")
 }
 
 func indexBoundsForFilterValue(v any) (startKey, stopKey []byte, ok bool) {
@@ -1549,10 +1576,12 @@ func pickIndexForFilter(filter *types.Document, idxInfos []backends.IndexInfo, q
 		if err != nil {
 			continue
 		}
+		nullEq := false
 		if _, _, ok := indexBoundsForFilterValue(v); !ok {
 			_, inOK := indexPointRangesForIn(v)
 			_, regexOK := regexPrefixRanges(v)
-			if !inOK && !(regexOK && queryIdentity == "") {
+			nullEq = isNullEquality(v)
+			if !inOK && !(regexOK && queryIdentity == "") && !nullEq {
 				continue
 			}
 		}
@@ -1563,6 +1592,9 @@ func pickIndexForFilter(filter *types.Document, idxInfos []backends.IndexInfo, q
 		var bestIdx backends.IndexInfo
 		for _, idx := range idxInfos {
 			if idx.Lossy || len(idx.Key) == 0 || idx.Key[0].Field != k {
+				continue
+			}
+			if nullEq && !nullEqualityIndexable(idx) {
 				continue
 			}
 			if collation.Parse(idx.Collation).Identity() != queryIdentity {
