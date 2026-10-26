@@ -180,7 +180,7 @@ const (
 // documents it examined are replayed ahead of the rest of the walk, returned
 // with trialWalkWon.
 func (c *collection) trySortWalkTrial(ctx context.Context, state *dbState, primary prolly.Map, params *backends.QueryParams, plan *indexLookupPlan) (*replayIter, trialOutcome, error) {
-	if params.Hint != nil {
+	if params.Hint != nil || plan.union {
 		return nil, trialNotRun, nil
 	}
 	target := trialTarget(params)

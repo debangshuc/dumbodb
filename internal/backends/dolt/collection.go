@@ -504,6 +504,9 @@ func (c *collection) tryIndexLookup(ctx context.Context, state *dbState, primary
 type indexLookupPlan struct {
 	info  backends.IndexInfo
 	index string
+	// union is set when ids are the union of one index scan per $or branch;
+	// info and index are then empty.
+	union bool
 	// keys is the number of index entries scanned; ids holds each matched
 	// document once and, when kept, values its entry's encoded index values.
 	keys   int
@@ -531,6 +534,12 @@ func (c *collection) planIndexLookup(ctx context.Context, state *dbState, primar
 func planIndexLookupIn(ctx context.Context, primary prolly.Map, idxInfos []backends.IndexInfo, idxMaps []prolly.Map, filter *types.Document, hint any, queryCollation *types.Document, keepValues bool) (*indexLookupPlan, error) {
 	if filter == nil || filter.Len() == 0 || len(idxInfos) == 0 {
 		return nil, nil
+	}
+	if filter.Len() == 1 && filter.Keys()[0] == "$or" {
+		if hint != nil {
+			return nil, nil
+		}
+		return planOrUnion(ctx, primary, idxInfos, idxMaps, must.NotFail(filter.Get("$or")), queryCollation)
 	}
 
 	queryColl := collation.Parse(queryCollation)
@@ -715,6 +724,44 @@ func planIndexLookupIn(ctx context.Context, primary prolly.Map, idxInfos []backe
 		}
 	}
 	return plan, nil
+}
+
+// planOrUnion plans each $or branch on its own index and unions the matched
+// ids, or returns nil when any branch has no index plan or the union exceeds
+// half the collection.
+func planOrUnion(ctx context.Context, primary prolly.Map, idxInfos []backends.IndexInfo, idxMaps []prolly.Map, branches any, queryCollation *types.Document) (*indexLookupPlan, error) {
+	arr, ok := branches.(*types.Array)
+	if !ok || arr.Len() == 0 {
+		return nil, nil
+	}
+	union := &indexLookupPlan{union: true}
+	seen := make(map[string]struct{})
+	for i := 0; i < arr.Len(); i++ {
+		branch, ok := must.NotFail(arr.Get(i)).(*types.Document)
+		if !ok {
+			return nil, nil
+		}
+		plan, err := planIndexLookupIn(ctx, primary, idxInfos, idxMaps, branch, nil, queryCollation, false)
+		if err != nil || plan == nil {
+			return nil, err
+		}
+		union.keys += plan.keys
+		for _, id := range plan.ids {
+			if _, dup := seen[string(id)]; dup {
+				continue
+			}
+			seen[string(id)] = struct{}{}
+			union.ids = append(union.ids, id)
+		}
+	}
+	primaryCount, err := primary.Count()
+	if err != nil {
+		return nil, fmt.Errorf("index lookup counting primary: %w", err)
+	}
+	if len(union.ids) > int(primaryCount)/2 {
+		return nil, nil
+	}
+	return union, nil
 }
 
 // fetch reads the plan's documents from the primary map, keeping only fields
