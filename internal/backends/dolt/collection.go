@@ -271,9 +271,10 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 	// Under a non-simple collation the handler re-checks matches through the
 	// against a regex substitution of the filter, so byte-level equality is
 	// not a sound lower bound  -- skip the prefilter.
-	var pf func([]byte) bool
+	var pf, prefixReject func([]byte) bool
 	if params != nil && !onlyRecordIDs && !params.Collated {
 		pf = buildScanPrefilter(params.Filter)
+		prefixReject = buildScanPrefixRejecter(params.Filter)
 	}
 
 	iter := newMapIter(ctx, state.ns, m, reverse, limit, onlyRecordIDs, pf)
@@ -282,6 +283,7 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 			mi.fields = params.Fields
 			mi.lazy = params.LazyDocuments && params.Fields == nil
 		}
+		mi.prefixReject = prefixReject
 		if state.backend != nil && state.backend.backgroundRP != nil {
 			mi.release = state.backend.backgroundRP.pinRoot(state.name, m.HashOf())
 		}
@@ -374,12 +376,25 @@ func (it *sparseMemberIter) Next() (struct{}, *types.Document, error) {
 // value, unsupported type, ambiguous numeric, etc.); in that case the scan
 // falls back to decoding every document.
 func buildScanPrefilter(filter *types.Document) func([]byte) bool {
+	preds := scanPredicates(filter)
+	if len(preds) == 0 {
+		return nil
+	}
+
+	return func(jsonBytes []byte) bool {
+		return matchScanPredicates(preds, jsonBytes, true)
+	}
+}
+
+// scanPredicates returns one predicate per filter field, or nil when some
+// field has none.
+func scanPredicates(filter *types.Document) []scanPredicate {
 	if filter == nil {
 		return nil
 	}
 
 	keys := filter.Keys()
-	preds := make([]func([]byte) bool, 0, len(keys))
+	preds := make([]scanPredicate, 0, len(keys))
 	for _, field := range keys {
 		// $and/$or/$comment/etc.  -- bail out and let the handler filter.
 		if strings.HasPrefix(field, "$") {
@@ -400,21 +415,32 @@ func buildScanPrefilter(filter *types.Document) func([]byte) bool {
 		}
 		preds = append(preds, pred)
 	}
+	return preds
+}
+
+// buildScanPrefixRejecter returns a predicate that rejects a stored document
+// from a prefix of it alone when the prefix proves the filter cannot match,
+// or nil under the conditions buildScanPrefilter returns nil.
+func buildScanPrefixRejecter(filter *types.Document) func([]byte) bool {
+	preds := scanPredicates(filter)
 	if len(preds) == 0 {
 		return nil
 	}
-
-	return func(jsonBytes []byte) bool {
-		for _, pred := range preds {
-			if !pred(jsonBytes) {
-				return false
-			}
-		}
-		return true
+	return func(prefix []byte) bool {
+		return !matchScanPredicates(preds, prefix, false)
 	}
 }
 
-func buildFieldPredicate(field string, value any) func([]byte) bool {
+func matchScanPredicates(preds []scanPredicate, stored []byte, complete bool) bool {
+	for _, pred := range preds {
+		if !pred(stored, complete) {
+			return false
+		}
+	}
+	return true
+}
+
+func buildFieldPredicate(field string, value any) scanPredicate {
 	return buildBSONFieldPredicate(field, value)
 }
 
@@ -4227,9 +4253,12 @@ type mapIter struct {
 	// true means "may match  -- run the full filter downstream." A nil
 	// prefilter keeps the unconditional full-scan behavior.
 	prefilter func([]byte) bool
-	fields    []string
-	lazy      bool
-	buf       []byte
+	// prefixReject, if non-nil, rejects a document stored out of band from
+	// its first chunk when that alone proves the filter cannot match.
+	prefixReject func([]byte) bool
+	fields       []string
+	lazy         bool
+	buf          []byte
 	// release, if set, unpins the iterated map's root from GC on Close.
 	release func()
 }
@@ -4298,8 +4327,9 @@ func (it *mapIter) Next() (struct{}, *types.Document, error) {
 		}
 
 		var jsonBytes []byte
-		jsonBytes, it.buf, err = readStoredBytesReusing(it.ctx, it.ns, v, it.buf)
-		if err != nil {
+		var rejected bool
+		jsonBytes, it.buf, rejected, err = readStoredBytesUnlessRejected(it.ctx, it.ns, v, it.buf, it.prefixReject)
+		if err != nil || rejected {
 			continue
 		}
 
