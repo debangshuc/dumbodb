@@ -116,6 +116,13 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 	if err != nil {
 		return nil, err
 	}
+	if sparseHint != nil && !sparseHint.Lossy {
+		docs, err := c.sparseMembers(ctx, state, m, *sparseHint, params.Fields)
+		if err != nil {
+			return nil, err
+		}
+		return &backends.QueryResult{Iter: newSliceIter(docs)}, nil
+	}
 	if sparseHint != nil {
 		res, err := c.queryUnhintedSparse(ctx, params)
 		if err != nil {
@@ -299,6 +306,35 @@ func (c *collection) hintedSparseIndex(ctx context.Context, state *dbState, para
 		}
 	}
 	return nil, nil
+}
+
+// sparseMembers reads the documents a sparse index holds, keeping only fields
+// when it is non-nil.
+func (c *collection) sparseMembers(ctx context.Context, state *dbState, primary prolly.Map, idx backends.IndexInfo, fields []string) ([]*types.Document, error) {
+	state.mu.RLock()
+	infos, maps, err := resolveIndexes(ctx, c, state)
+	state.mu.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	i := slices.IndexFunc(infos, func(info backends.IndexInfo) bool { return info.Name == idx.Name })
+	if i < 0 {
+		return nil, fmt.Errorf("sparse index %q not found", idx.Name)
+	}
+	entries, err := idxpkg.RangeLookup(ctx, maps[i], nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	countKeysExamined(len(entries))
+	plan := &indexLookupPlan{info: idx, index: idx.Name, keys: len(entries)}
+	seen := make(map[string]struct{}, len(entries))
+	for _, id := range entries {
+		if _, dup := seen[string(id)]; !dup {
+			seen[string(id)] = struct{}{}
+			plan.ids = append(plan.ids, id)
+		}
+	}
+	return plan.fetch(ctx, state, primary, fields)
 }
 
 // queryUnhintedSparse runs params with its sparse-index hint removed; the
@@ -747,6 +783,9 @@ func chooseIndexRange(idxInfos []backends.IndexInfo, filter *types.Document, hin
 		if !ok && isNullEquality(v) && nullEqualityIndexable(idxInfos[entry.mapIdx]) {
 			s, e, ok = idxpkg.LowerBoundInclusive(types.Null), idxpkg.UpperBoundInclusive(types.Null), true
 		}
+		if !ok && isExistsTrue(v) && existsIndexable(idxInfos[entry.mapIdx]) {
+			s, e, ok = nil, nil, true
+		}
 		if !ok {
 			continue
 		}
@@ -1010,6 +1049,32 @@ func isNullEquality(v any) bool {
 // a null entry.
 func nullEqualityIndexable(idx backends.IndexInfo) bool {
 	return !idx.Sparse && !idx.Multikey && !strings.Contains(idx.Key[0].Field, ".")
+}
+
+// isExistsTrue reports whether v, a filter field's condition, is
+// {$exists: true} or another truthy $exists.
+func isExistsTrue(v any) bool {
+	doc, ok := v.(*types.Document)
+	if !ok || doc.Len() != 1 || doc.Keys()[0] != "$exists" {
+		return false
+	}
+	switch e := must.NotFail(doc.Get("$exists")).(type) {
+	case bool:
+		return e
+	case int32:
+		return e != 0
+	case int64:
+		return e != 0
+	case float64:
+		return e != 0
+	}
+	return false
+}
+
+// existsIndexable reports whether idx holds exactly the documents in which
+// its one top-level field exists: a sparse single-field index.
+func existsIndexable(idx backends.IndexInfo) bool {
+	return idx.Sparse && len(idx.Key) == 1 && !strings.Contains(idx.Key[0].Field, ".")
 }
 
 func indexBoundsForFilterValue(v any) (startKey, stopKey []byte, ok bool) {
@@ -1576,12 +1641,12 @@ func pickIndexForFilter(filter *types.Document, idxInfos []backends.IndexInfo, q
 		if err != nil {
 			continue
 		}
-		nullEq := false
+		nullEq, exists := false, false
 		if _, _, ok := indexBoundsForFilterValue(v); !ok {
 			_, inOK := indexPointRangesForIn(v)
 			_, regexOK := regexPrefixRanges(v)
-			nullEq = isNullEquality(v)
-			if !inOK && !(regexOK && queryIdentity == "") && !nullEq {
+			nullEq, exists = isNullEquality(v), isExistsTrue(v)
+			if !inOK && !(regexOK && queryIdentity == "") && !nullEq && !exists {
 				continue
 			}
 		}
@@ -1594,7 +1659,7 @@ func pickIndexForFilter(filter *types.Document, idxInfos []backends.IndexInfo, q
 			if idx.Lossy || len(idx.Key) == 0 || idx.Key[0].Field != k {
 				continue
 			}
-			if nullEq && !nullEqualityIndexable(idx) {
+			if (nullEq && !nullEqualityIndexable(idx)) || (exists && !existsIndexable(idx)) {
 				continue
 			}
 			if collation.Parse(idx.Collation).Identity() != queryIdentity {
