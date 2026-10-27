@@ -27,17 +27,15 @@ func init() {
 }
 
 func newDoltHandler(opts *NewHandlerOpts) (*handler.Handler, CloseBackendFunc, error) {
-	if opts.DoltDataDir == "" {
-		return nil, nil, fmt.Errorf("--data-dir is required")
-	}
-	dataDir := opts.DoltDataDir
-
 	var b backends.Backend
 	var err error
 	if opts.Backend != nil {
 		b = opts.Backend
 	} else {
-		b, err = dolt.NewBackend(dataDir, opts.Logger, opts.AutoCommit, opts.SessionIsolation, opts.SessionTimeout, opts.SessionSweepPeriod)
+		if opts.DoltDataDir == "" {
+			return nil, nil, fmt.Errorf("dolt handler: data directory is required")
+		}
+		b, err = dolt.NewBackend(opts.DoltDataDir, opts.Logger, opts.AutoCommit, opts.SessionIsolation, opts.SessionTimeout, opts.SessionSweepPeriod)
 		if err != nil {
 			return nil, nil, err
 		}

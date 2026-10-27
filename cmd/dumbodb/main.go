@@ -93,7 +93,7 @@ func run(logger *slog.Logger) error {
 	// Use a custom FlagSet to avoid mysql-related flags registered
 	// globally by the vitess dependency.
 	fs := flag.NewFlagSet("dumbodb", flag.ExitOnError)
-	dataDir := fs.String("data-dir", "", "directory for storing Dolt data")
+	dataDir := fs.String("data-dir", "", "directory for storing Dolt data (required)")
 	addr := fs.String("addr", "127.0.0.1:27017", "listen address")
 	port := fs.Int("port", 0, "listen port (overrides port in --addr if set)")
 	tlsMode := fs.String("tlsMode", "disabled", "TLS mode (disabled, allowTLS, preferTLS, or requireTLS)")
