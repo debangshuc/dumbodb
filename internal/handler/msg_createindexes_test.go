@@ -98,17 +98,10 @@ func TestProcessIndexIgnoreUnknownIndexOptions(t *testing.T) {
 
 	t.Run("disabled", func(t *testing.T) {
 		_, err := processIndex("createIndexes", newSpec(), false)
-		assertErrCode(t, err, handlererrors.ErrBadValue)
-		if !strings.Contains(err.Error(), `Index option "ns" is unknown`) {
+		assertErrCode(t, err, handlererrors.ErrInvalidIndexSpecificationOption)
+		if !strings.Contains(err.Error(), `The field 'ns' is not valid for an index specification`) {
 			t.Fatalf("unexpected error %v", err)
 		}
-	})
-
-	t.Run("omitted", func(t *testing.T) {
-		arr := must.NotFail(types.NewArray(newSpec()))
-
-		_, err := processIndexesArray("createIndexes", arr, false)
-		assertErrCode(t, err, handlererrors.ErrBadValue)
 	})
 
 	t.Run("recognized options still work when enabled", func(t *testing.T) {

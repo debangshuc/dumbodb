@@ -126,7 +126,7 @@ func (h *Handler) MsgCreateIndexes(connCtx context.Context, msg *wire.OpMsg) (*w
 		)
 	}
 
-	ignoreUnknownIndexOptions, err := common.GetOptionalParam[bool](document, "ignoreUnknownIndexOptions", false)
+	ignoreUnknownIndexOptions, err := common.GetOptionalBoolOrIntParam(document, "ignoreUnknownIndexOptions", false)
 	if err != nil {
 		return nil, err
 	}
@@ -470,8 +470,8 @@ func processIndex(command string, indexDoc *types.Document, ignoreUnknownIndexOp
 			}
 
 			return nil, handlererrors.NewCommandErrorMsgWithArgument(
-				handlererrors.ErrBadValue,
-				fmt.Sprintf("Index option %q is unknown", opt),
+				handlererrors.ErrInvalidIndexSpecificationOption,
+				fmt.Sprintf("The field '%s' is not valid for an index specification", opt),
 				command,
 			)
 		}
