@@ -1890,7 +1890,7 @@ Creates a new server-side database by cloning a remote. Must be run against the
 
 The clone brings every branch and sets the default branch (`main`) to track
 `origin`; inspect it with `dumboBranch`, not the clone response. When `from` is
-a registered backup's URL, no `origin` is registered and `main` tracks nothing
+one of this server's backup URLs, the clone is a plain database with no `origin`
 (see Notes).
 
 ### Example
@@ -1917,10 +1917,12 @@ admin.runCommand({ dumboClone: 1, from: "myorg/orders", as: "orders" })
 
 ### Notes
 
-- `from` may be a backup's URL (a URL in `admin.system.backups`, any database's backup). Such a clone brings the backup's branches but registers no `origin` remote and gives `main` no upstream -- the URL must never become a remote, since the next `dumboBackup sync` would replace its root. `dumboBackup restore` still recreates the whole database, working sets included.
+- `from` may be a backup's URL (a URL in `admin.system.backups`, any database's backup). Such a clone brings the backup's branches but no `origin` remote, tracking refs or upstream -- the URL must never become a remote, since the next `dumboBackup sync` would replace its root. `dumboBackup restore` still recreates the whole database, working sets included.
 
 - The clone registers an `origin` remote pointing at `from` and sets the default branch to track `origin/<default>`, matching `git clone`. After a clone, a bare `dumboPush` / `dumboPull` needs no target.
 - Every remote branch is materialized as a local branch and a tracking ref `refs/remotes/origin/<branch>`.
+- Only branch heads are cloned; working sets are not, so a source with uncommitted changes (such as a backup) clones clean.
+- The backup-URL check only sees this server's backups. A URL used as a backup by another server clones with an `origin`, and pushes to it are replaced by that server's next `dumboBackup sync`.
 
 ---
 
