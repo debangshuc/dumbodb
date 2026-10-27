@@ -113,6 +113,11 @@ func filterDocumentPair(doc *types.Document, filterKey string, filterValue any, 
 
 	switch filterValue := filterValue.(type) {
 	case *types.Document:
+		if filterSuffix == filterKey {
+			// A top-level key has one branch, which reads the same value from
+			// doc as from a {filterKey: value} copy.
+			return filterFieldExpr(doc, filterKey, filterSuffix, filterValue, cmp)
+		}
 		branches := make([]*types.Document, 0, len(vals)+1)
 		for _, val := range vals {
 			branches = append(branches, must.NotFail(types.NewDocument(filterSuffix, val)))

@@ -116,6 +116,13 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 	if err != nil {
 		return nil, err
 	}
+	if sparseHint != nil && !sparseHint.Lossy {
+		docs, err := c.sparseMembers(ctx, state, m, *sparseHint, params.Fields)
+		if err != nil {
+			return nil, err
+		}
+		return &backends.QueryResult{Iter: newSliceIter(docs)}, nil
+	}
 	if sparseHint != nil {
 		res, err := c.queryUnhintedSparse(ctx, params)
 		if err != nil {
@@ -215,7 +222,9 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 		}
 	}
 
-	if !naturalHint && fieldSort {
+	// Without a limit a filtered walk fetches every document by point lookup
+	// to return a fraction of them; the sequential scan and sort is cheaper.
+	if !naturalHint && fieldSort && (params.LimitHint > 0 || params.Filter.Len() == 0) {
 		iter, ok, err := c.trySortWalk(ctx, state, m, params)
 		if err != nil {
 			return nil, err
@@ -262,16 +271,19 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 	// Under a non-simple collation the handler re-checks matches through the
 	// against a regex substitution of the filter, so byte-level equality is
 	// not a sound lower bound  -- skip the prefilter.
-	var pf func([]byte) bool
+	var pf, prefixReject func([]byte) bool
 	if params != nil && !onlyRecordIDs && !params.Collated {
 		pf = buildScanPrefilter(params.Filter)
+		prefixReject = buildScanPrefixRejecter(params.Filter)
 	}
 
 	iter := newMapIter(ctx, state.ns, m, reverse, limit, onlyRecordIDs, pf)
 	if mi, ok := iter.(*mapIter); ok {
 		if params != nil {
 			mi.fields = params.Fields
+			mi.lazy = params.LazyDocuments && params.Fields == nil
 		}
+		mi.prefixReject = prefixReject
 		if state.backend != nil && state.backend.backgroundRP != nil {
 			mi.release = state.backend.backgroundRP.pinRoot(state.name, m.HashOf())
 		}
@@ -297,6 +309,35 @@ func (c *collection) hintedSparseIndex(ctx context.Context, state *dbState, para
 		}
 	}
 	return nil, nil
+}
+
+// sparseMembers reads the documents a sparse index holds, keeping only fields
+// when it is non-nil.
+func (c *collection) sparseMembers(ctx context.Context, state *dbState, primary prolly.Map, idx backends.IndexInfo, fields []string) ([]*types.Document, error) {
+	state.mu.RLock()
+	infos, maps, err := resolveIndexes(ctx, c, state)
+	state.mu.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	i := slices.IndexFunc(infos, func(info backends.IndexInfo) bool { return info.Name == idx.Name })
+	if i < 0 {
+		return nil, fmt.Errorf("sparse index %q not found", idx.Name)
+	}
+	entries, err := idxpkg.RangeLookup(ctx, maps[i], nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	countKeysExamined(len(entries))
+	plan := &indexLookupPlan{info: idx, index: idx.Name, keys: len(entries)}
+	seen := make(map[string]struct{}, len(entries))
+	for _, id := range entries {
+		if _, dup := seen[string(id)]; !dup {
+			seen[string(id)] = struct{}{}
+			plan.ids = append(plan.ids, id)
+		}
+	}
+	return plan.fetch(ctx, state, primary, fields)
 }
 
 // queryUnhintedSparse runs params with its sparse-index hint removed; the
@@ -335,12 +376,25 @@ func (it *sparseMemberIter) Next() (struct{}, *types.Document, error) {
 // value, unsupported type, ambiguous numeric, etc.); in that case the scan
 // falls back to decoding every document.
 func buildScanPrefilter(filter *types.Document) func([]byte) bool {
+	preds := scanPredicates(filter)
+	if len(preds) == 0 {
+		return nil
+	}
+
+	return func(jsonBytes []byte) bool {
+		return matchScanPredicates(preds, jsonBytes, true)
+	}
+}
+
+// scanPredicates returns one predicate per filter field, or nil when some
+// field has none.
+func scanPredicates(filter *types.Document) []scanPredicate {
 	if filter == nil {
 		return nil
 	}
 
 	keys := filter.Keys()
-	preds := make([]func([]byte) bool, 0, len(keys))
+	preds := make([]scanPredicate, 0, len(keys))
 	for _, field := range keys {
 		// $and/$or/$comment/etc.  -- bail out and let the handler filter.
 		if strings.HasPrefix(field, "$") {
@@ -361,21 +415,32 @@ func buildScanPrefilter(filter *types.Document) func([]byte) bool {
 		}
 		preds = append(preds, pred)
 	}
+	return preds
+}
+
+// buildScanPrefixRejecter returns a predicate that rejects a stored document
+// from a prefix of it alone when the prefix proves the filter cannot match,
+// or nil under the conditions buildScanPrefilter returns nil.
+func buildScanPrefixRejecter(filter *types.Document) func([]byte) bool {
+	preds := scanPredicates(filter)
 	if len(preds) == 0 {
 		return nil
 	}
-
-	return func(jsonBytes []byte) bool {
-		for _, pred := range preds {
-			if !pred(jsonBytes) {
-				return false
-			}
-		}
-		return true
+	return func(prefix []byte) bool {
+		return !matchScanPredicates(preds, prefix, false)
 	}
 }
 
-func buildFieldPredicate(field string, value any) func([]byte) bool {
+func matchScanPredicates(preds []scanPredicate, stored []byte, complete bool) bool {
+	for _, pred := range preds {
+		if !pred(stored, complete) {
+			return false
+		}
+	}
+	return true
+}
+
+func buildFieldPredicate(field string, value any) scanPredicate {
 	return buildBSONFieldPredicate(field, value)
 }
 
@@ -742,6 +807,12 @@ func chooseIndexRange(idxInfos []backends.IndexInfo, filter *types.Document, hin
 			v = multikeyScanBound(v)
 		}
 		s, e, ok := indexBoundsForFilterValue(v)
+		if !ok && isNullEquality(v) && nullEqualityIndexable(idxInfos[entry.mapIdx]) {
+			s, e, ok = idxpkg.LowerBoundInclusive(types.Null), idxpkg.UpperBoundInclusive(types.Null), true
+		}
+		if !ok && isExistsTrue(v) && existsIndexable(idxInfos[entry.mapIdx]) {
+			s, e, ok = nil, nil, true
+		}
 		if !ok {
 			continue
 		}
@@ -981,6 +1052,56 @@ func regexLiteralPrefix(pattern string) (string, bool) {
 		return "", false
 	}
 	return string(lit), true
+}
+
+// isNullEquality reports whether v, a filter field's condition, is null
+// equality, which matches null and missing values.
+func isNullEquality(v any) bool {
+	if doc, ok := v.(*types.Document); ok {
+		if doc.Len() != 1 || doc.Keys()[0] != "$eq" {
+			return false
+		}
+		v = must.NotFail(doc.Get("$eq"))
+	}
+	switch v.(type) {
+	case nil, types.NullType:
+		return true
+	}
+	return false
+}
+
+// nullEqualityIndexable reports whether idx's null entries are exactly the
+// documents a null equality on its leading field matches: missing values are
+// indexed as null, and no array element or dotted path can match null without
+// a null entry.
+func nullEqualityIndexable(idx backends.IndexInfo) bool {
+	return !idx.Sparse && !idx.Multikey && !strings.Contains(idx.Key[0].Field, ".")
+}
+
+// isExistsTrue reports whether v, a filter field's condition, is
+// {$exists: true} or another truthy $exists.
+func isExistsTrue(v any) bool {
+	doc, ok := v.(*types.Document)
+	if !ok || doc.Len() != 1 || doc.Keys()[0] != "$exists" {
+		return false
+	}
+	switch e := must.NotFail(doc.Get("$exists")).(type) {
+	case bool:
+		return e
+	case int32:
+		return e != 0
+	case int64:
+		return e != 0
+	case float64:
+		return e != 0
+	}
+	return false
+}
+
+// existsIndexable reports whether idx holds exactly the documents in which
+// its one top-level field exists: a sparse single-field index.
+func existsIndexable(idx backends.IndexInfo) bool {
+	return idx.Sparse && len(idx.Key) == 1 && !strings.Contains(idx.Key[0].Field, ".")
 }
 
 func indexBoundsForFilterValue(v any) (startKey, stopKey []byte, ok bool) {
@@ -1547,10 +1668,12 @@ func pickIndexForFilter(filter *types.Document, idxInfos []backends.IndexInfo, q
 		if err != nil {
 			continue
 		}
+		nullEq, exists := false, false
 		if _, _, ok := indexBoundsForFilterValue(v); !ok {
 			_, inOK := indexPointRangesForIn(v)
 			_, regexOK := regexPrefixRanges(v)
-			if !inOK && !(regexOK && queryIdentity == "") {
+			nullEq, exists = isNullEquality(v), isExistsTrue(v)
+			if !inOK && !(regexOK && queryIdentity == "") && !nullEq && !exists {
 				continue
 			}
 		}
@@ -1561,6 +1684,9 @@ func pickIndexForFilter(filter *types.Document, idxInfos []backends.IndexInfo, q
 		var bestIdx backends.IndexInfo
 		for _, idx := range idxInfos {
 			if idx.Lossy || len(idx.Key) == 0 || idx.Key[0].Field != k {
+				continue
+			}
+			if (nullEq && !nullEqualityIndexable(idx)) || (exists && !existsIndexable(idx)) {
 				continue
 			}
 			if collation.Parse(idx.Collation).Identity() != queryIdentity {
@@ -4127,8 +4253,12 @@ type mapIter struct {
 	// true means "may match  -- run the full filter downstream." A nil
 	// prefilter keeps the unconditional full-scan behavior.
 	prefilter func([]byte) bool
-	fields    []string
-	buf       []byte
+	// prefixReject, if non-nil, rejects a document stored out of band from
+	// its first chunk when that alone proves the filter cannot match.
+	prefixReject func([]byte) bool
+	fields       []string
+	lazy         bool
+	buf          []byte
 	// release, if set, unpins the iterated map's root from GC on Close.
 	release func()
 }
@@ -4197,8 +4327,9 @@ func (it *mapIter) Next() (struct{}, *types.Document, error) {
 		}
 
 		var jsonBytes []byte
-		jsonBytes, it.buf, err = readStoredBytesReusing(it.ctx, it.ns, v, it.buf)
-		if err != nil {
+		var rejected bool
+		jsonBytes, it.buf, rejected, err = readStoredBytesUnlessRejected(it.ctx, it.ns, v, it.buf, it.prefixReject)
+		if err != nil || rejected {
 			continue
 		}
 
@@ -4208,8 +4339,13 @@ func (it *mapIter) Next() (struct{}, *types.Document, error) {
 				continue
 			}
 		}
-		doc, err = bsonToDocFields(jsonBytes, it.fields)
-		if err != nil {
+		if it.lazy {
+			raw, err := stripVersion(jsonBytes)
+			if err != nil {
+				return struct{}{}, nil, err
+			}
+			doc = types.NewLazyDocument(bytes.Clone(raw))
+		} else if doc, err = bsonToDocFields(jsonBytes, it.fields); err != nil {
 			return struct{}{}, nil, err
 		}
 
