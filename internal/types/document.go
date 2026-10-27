@@ -59,9 +59,12 @@ func NewLazyDocument(raw []byte) *Document {
 
 // load decodes a lazy document's fields.
 func (d *Document) load() {
-	if d == nil || !d.lazy {
-		return
+	if d != nil && d.lazy {
+		d.decodeLazy()
 	}
+}
+
+func (d *Document) decodeLazy() {
 	doc, err := rawDecoder(d.raw)
 	if err != nil {
 		panic(fmt.Sprintf("types.Document: decoding lazy document: %v", err))
