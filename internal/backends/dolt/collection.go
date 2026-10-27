@@ -280,6 +280,7 @@ func (c *collection) Query(ctx context.Context, params *backends.QueryParams) (*
 	if mi, ok := iter.(*mapIter); ok {
 		if params != nil {
 			mi.fields = params.Fields
+			mi.lazy = params.LazyDocuments && params.Fields == nil
 		}
 		if state.backend != nil && state.backend.backgroundRP != nil {
 			mi.release = state.backend.backgroundRP.pinRoot(state.name, m.HashOf())
@@ -4227,6 +4228,7 @@ type mapIter struct {
 	// prefilter keeps the unconditional full-scan behavior.
 	prefilter func([]byte) bool
 	fields    []string
+	lazy      bool
 	buf       []byte
 	// release, if set, unpins the iterated map's root from GC on Close.
 	release func()
@@ -4307,8 +4309,13 @@ func (it *mapIter) Next() (struct{}, *types.Document, error) {
 				continue
 			}
 		}
-		doc, err = bsonToDocFields(jsonBytes, it.fields)
-		if err != nil {
+		if it.lazy {
+			raw, err := stripVersion(jsonBytes)
+			if err != nil {
+				return struct{}{}, nil, err
+			}
+			doc = types.NewLazyDocument(bytes.Clone(raw))
+		} else if doc, err = bsonToDocFields(jsonBytes, it.fields); err != nil {
 			return struct{}{}, nil, err
 		}
 

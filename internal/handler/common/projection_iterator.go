@@ -83,8 +83,7 @@ func (iter *projectionIterator) Next() (struct{}, *types.Document, error) {
 
 // idFirstOrAbsent reports whether an empty projection would return doc as is.
 func idFirstOrAbsent(doc *types.Document) bool {
-	keys := doc.Keys()
-	return len(keys) == 0 || keys[0] == "_id" || !doc.Has("_id")
+	return doc.Command() == "_id" || doc.Len() == 0 || !doc.Has("_id")
 }
 
 func (iter *projectionIterator) Close() {

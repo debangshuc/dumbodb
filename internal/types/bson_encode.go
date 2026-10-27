@@ -25,6 +25,9 @@ import (
 // AppendBSON appends the document's BSON encoding to dst. Size dst with BSONSize
 // to encode without reallocating.
 func (d *Document) AppendBSON(dst []byte) []byte {
+	if d.raw != nil {
+		return append(dst, d.raw...)
+	}
 	start := len(dst)
 	dst = append(dst, 0, 0, 0, 0)
 	for _, f := range d.fields {

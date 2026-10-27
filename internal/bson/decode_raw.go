@@ -25,6 +25,10 @@ import (
 	"github.com/dolthub/dumbodb/internal/types"
 )
 
+func init() {
+	types.RegisterRawDecoder(DecodeRawDocument)
+}
+
 // DecodeRawDocument decodes a BSON document directly into [*types.Document],
 // following the same validation rules as [ToDocument] without building an
 // intermediate wirebson document. MinKey and MaxKey decode at any depth.

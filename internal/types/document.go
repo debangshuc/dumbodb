@@ -15,6 +15,7 @@
 package types
 
 import (
+	"bytes"
 	"cmp"
 	"fmt"
 	"log/slog"
@@ -32,10 +33,46 @@ import (
 // that is not a field and can't be accessed by most methods.
 // It is used to locate the document in the backend.
 type Document struct {
-	keys     map[string]int // nil until the document has keyIndexMinFields fields
-	fields   []field
+	keys   map[string]int // nil until the document has keyIndexMinFields fields
+	fields []field
+	// raw, when set, is the document's BSON encoding: the fields still hold
+	// it or, while lazy, have yet to be decoded from it. Any change clears it.
+	raw      []byte
+	lazy     bool
 	frozen   bool
 	recordID int64
+}
+
+var rawDecoder func(raw []byte) (*Document, error)
+
+// RegisterRawDecoder installs the BSON decoder lazy documents use.
+func RegisterRawDecoder(decode func(raw []byte) (*Document, error)) {
+	rawDecoder = decode
+}
+
+// NewLazyDocument returns a document whose fields are decoded from raw, a
+// valid BSON document it takes ownership of, on first access. Until the
+// document is changed, AppendBSON copies raw instead of encoding.
+func NewLazyDocument(raw []byte) *Document {
+	return &Document{raw: raw, lazy: true}
+}
+
+// load decodes a lazy document's fields.
+func (d *Document) load() {
+	if d == nil || !d.lazy {
+		return
+	}
+	doc, err := rawDecoder(d.raw)
+	if err != nil {
+		panic(fmt.Sprintf("types.Document: decoding lazy document: %v", err))
+	}
+	d.fields, d.keys, d.lazy = doc.fields, doc.keys, false
+}
+
+// modify loads the document and drops its raw encoding ahead of a change.
+func (d *Document) modify() {
+	d.load()
+	d.raw = nil
 }
 
 // Field order is chosen to reduce gc pressure and satisfy the fieldalignment linter.
@@ -143,6 +180,7 @@ func (d *Document) Len() int {
 	if d == nil {
 		return 0
 	}
+	d.load()
 
 	return len(d.fields)
 }
@@ -160,6 +198,7 @@ func (d *Document) Iterator() iterator.Interface[string, any] {
 //
 // It returns nil for nil Document.
 func (d *Document) Map() map[string]any {
+	d.load()
 	if d == nil {
 		return nil
 	}
@@ -178,6 +217,7 @@ func (d *Document) Map() map[string]any {
 //
 // If document or document's fields are not set (nil), it returns nil.
 func (d *Document) Keys() []string {
+	d.load()
 	if d == nil || d.fields == nil {
 		return nil
 	}
@@ -194,6 +234,7 @@ func (d *Document) Keys() []string {
 //
 // If document or document's fields are not set (nil), it returns nil.
 func (d *Document) Values() []any {
+	d.load()
 	if d == nil || d.fields == nil {
 		return nil
 	}
@@ -209,6 +250,7 @@ func (d *Document) Values() []any {
 // FindDuplicateKey returns the first duplicate key in the document and true if duplicate exists.
 // If duplicate keys don't exist it returns empty string and false.
 func (d *Document) FindDuplicateKey() (string, bool) {
+	d.load()
 	seen := make(map[string]struct{}, len(d.fields))
 	for _, field := range d.fields {
 		if _, ok := seen[field.key]; ok {
@@ -224,14 +266,33 @@ func (d *Document) FindDuplicateKey() (string, bool) {
 // Command returns the first document's key. This is often used as a command name.
 // It returns an empty string if document is nil or empty.
 func (d *Document) Command() string {
-	if d == nil || len(d.fields) == 0 {
+	if d == nil {
+		return ""
+	}
+	if d.lazy {
+		return rawFirstKey(d.raw)
+	}
+	if len(d.fields) == 0 {
 		return ""
 	}
 
 	return d.fields[0].key
 }
 
+// rawFirstKey returns the first key of a BSON document, or "" when it has none.
+func rawFirstKey(raw []byte) string {
+	if len(raw) < 6 || raw[4] == 0 {
+		return ""
+	}
+	end := bytes.IndexByte(raw[5:], 0)
+	if end < 0 {
+		return ""
+	}
+	return string(raw[5 : 5+end])
+}
+
 func (d *Document) Has(key string) bool {
+	d.load()
 	if d.keys != nil {
 		_, ok := d.keys[key]
 		return ok
@@ -260,6 +321,7 @@ func (d *Document) Get(key string) (any, error) {
 	if d == nil {
 		return nil, &keyNotFoundError{key: key, nilDocument: true}
 	}
+	d.load()
 
 	if d.isKeyDuplicate(key) {
 		panic(fmt.Sprintf("types.Document.Get: key is duplicated: %s", key))
@@ -296,6 +358,7 @@ func (e *keyNotFoundError) Error() string {
 func (d *Document) Set(key string, value any) {
 	assertType(value)
 	d.checkFrozen()
+	d.modify()
 
 	if d.isKeyDuplicate(key) {
 		panic(fmt.Sprintf("types.Document.Set: key is duplicated: %s", key))
@@ -323,6 +386,7 @@ func (d *Document) Set(key string, value any) {
 // AppendDecoded appends a field without Set's type and duplicate-key checks,
 // keeping duplicates as NewDocument does. For decoders of valid BSON.
 func (d *Document) AppendDecoded(key string, value any) {
+	d.modify()
 	d.fields = append(d.fields, field{key: key, value: value})
 	if d.keys != nil {
 		d.keys[key]++
@@ -335,6 +399,7 @@ func (d *Document) AppendDecoded(key string, value any) {
 // If the key is duplicated, it panics.
 func (d *Document) Remove(key string) any {
 	d.checkFrozen()
+	d.modify()
 
 	if d.isKeyDuplicate(key) {
 		panic(fmt.Sprintf("types.Document.Remove: key is duplicated: %s", key))
@@ -368,6 +433,7 @@ func (d *Document) GetByPath(path Path) (any, error) {
 func (d *Document) SetByPath(path Path, value any) error {
 	assertType(value)
 	d.checkFrozen()
+	d.modify()
 
 	if path.Len() == 1 {
 		d.Set(path.Slice()[0], value)
@@ -417,6 +483,7 @@ func (d *Document) SetByPath(path Path, value any) error {
 // If the Path has only one element, it removes the value for the given key.
 func (d *Document) RemoveByPath(path Path) {
 	d.checkFrozen()
+	d.modify()
 
 	if path.Len() == 1 {
 		d.Remove(path.Slice()[0])
@@ -428,6 +495,7 @@ func (d *Document) RemoveByPath(path Path) {
 
 func (d *Document) SortFieldsByKey() {
 	d.checkFrozen()
+	d.modify()
 
 	slices.SortFunc(d.fields, func(a, b field) int {
 		return cmp.Compare(a.key, b.key)
@@ -435,6 +503,7 @@ func (d *Document) SortFieldsByKey() {
 }
 
 func (d *Document) isKeyDuplicate(targetKey string) bool {
+	d.load()
 	if d.keys != nil {
 		return d.keys[targetKey] > 1
 	}
@@ -451,6 +520,7 @@ func (d *Document) isKeyDuplicate(targetKey string) bool {
 }
 
 func (d *Document) moveIDToTheFirstIndex() {
+	d.modify()
 	if !d.Has("_id") {
 		return
 	}
