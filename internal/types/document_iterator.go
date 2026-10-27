@@ -28,7 +28,6 @@ type documentIterator struct {
 }
 
 func newDocumentIterator(document *Document) iterator.Interface[string, any] {
-	document.load()
 	iter := &documentIterator{
 		doc:   document,
 		token: resource.NewToken(),

@@ -35,12 +35,17 @@ import (
 type Document struct {
 	keys   map[string]int // nil until the document has keyIndexMinFields fields
 	fields []field
-	// raw, when set, is the document's BSON encoding: the fields still hold
-	// it or, while lazy, have yet to be decoded from it. Any change clears it.
-	raw      []byte
-	lazy     bool
-	frozen   bool
+	// extra holds rarely set state, keeping Document in a small size class.
+	extra    *documentExtra
 	recordID int64
+}
+
+type documentExtra struct {
+	// raw, when set, is the document's BSON encoding: the fields still hold
+	// it or, until decoded, have yet to be decoded from it. Any change clears it.
+	raw     []byte
+	decoded bool
+	frozen  bool
 }
 
 var rawDecoder func(raw []byte) (*Document, error)
@@ -54,28 +59,46 @@ func RegisterRawDecoder(decode func(raw []byte) (*Document, error)) {
 // valid BSON document it takes ownership of, on first access. Until the
 // document is changed, AppendBSON copies raw instead of encoding.
 func NewLazyDocument(raw []byte) *Document {
-	return &Document{raw: raw, lazy: true}
+	return &Document{extra: &documentExtra{raw: raw}}
 }
 
-// load decodes a lazy document's fields.
+// load decodes a lazy document's fields. d must not be nil. A lazy document
+// has no fields until decoded, so the check costs other documents one compare.
 func (d *Document) load() {
-	if d != nil && d.lazy {
+	if d.fields == nil && d.extra != nil {
 		d.decodeLazy()
 	}
 }
 
 func (d *Document) decodeLazy() {
-	doc, err := rawDecoder(d.raw)
+	if d.extra.raw == nil || d.extra.decoded {
+		return
+	}
+	doc, err := rawDecoder(d.extra.raw)
 	if err != nil {
 		panic(fmt.Sprintf("types.Document: decoding lazy document: %v", err))
 	}
-	d.fields, d.keys, d.lazy = doc.fields, doc.keys, false
+	d.fields, d.keys, d.extra.decoded = doc.fields, doc.keys, true
+}
+
+func (d *Document) lazy() bool {
+	return d.extra != nil && d.extra.raw != nil && !d.extra.decoded
+}
+
+// rawBSON returns the document's BSON encoding while it is unchanged, or nil.
+func (d *Document) rawBSON() []byte {
+	if d.extra == nil {
+		return nil
+	}
+	return d.extra.raw
 }
 
 // modify loads the document and drops its raw encoding ahead of a change.
 func (d *Document) modify() {
 	d.load()
-	d.raw = nil
+	if d.extra != nil {
+		d.extra.raw = nil
+	}
 }
 
 // Field order is chosen to reduce gc pressure and satisfy the fieldalignment linter.
@@ -156,12 +179,15 @@ func (d *Document) SetRecordID(recordID int64) {
 // It is safe to call Freeze multiple times.
 func (d *Document) Freeze() {
 	if d != nil {
-		d.frozen = true
+		if d.extra == nil {
+			d.extra = new(documentExtra)
+		}
+		d.extra.frozen = true
 	}
 }
 
 func (d *Document) checkFrozen() {
-	if d.frozen {
+	if d.extra != nil && d.extra.frozen {
 		panic("document is frozen and can't be modified")
 	}
 }
@@ -183,8 +209,9 @@ func (d *Document) Len() int {
 	if d == nil {
 		return 0
 	}
-	d.load()
-
+	if d.fields == nil && d.extra != nil {
+		d.decodeLazy()
+	}
 	return len(d.fields)
 }
 
@@ -201,10 +228,10 @@ func (d *Document) Iterator() iterator.Interface[string, any] {
 //
 // It returns nil for nil Document.
 func (d *Document) Map() map[string]any {
-	d.load()
 	if d == nil {
 		return nil
 	}
+	d.load()
 
 	m := make(map[string]any, len(d.fields))
 	for _, field := range d.fields {
@@ -220,8 +247,11 @@ func (d *Document) Map() map[string]any {
 //
 // If document or document's fields are not set (nil), it returns nil.
 func (d *Document) Keys() []string {
+	if d == nil {
+		return nil
+	}
 	d.load()
-	if d == nil || d.fields == nil {
+	if d.fields == nil {
 		return nil
 	}
 
@@ -237,8 +267,11 @@ func (d *Document) Keys() []string {
 //
 // If document or document's fields are not set (nil), it returns nil.
 func (d *Document) Values() []any {
+	if d == nil {
+		return nil
+	}
 	d.load()
-	if d == nil || d.fields == nil {
+	if d.fields == nil {
 		return nil
 	}
 
@@ -272,8 +305,8 @@ func (d *Document) Command() string {
 	if d == nil {
 		return ""
 	}
-	if d.lazy {
-		return rawFirstKey(d.raw)
+	if d.lazy() {
+		return rawFirstKey(d.extra.raw)
 	}
 	if len(d.fields) == 0 {
 		return ""
@@ -295,7 +328,6 @@ func rawFirstKey(raw []byte) string {
 }
 
 func (d *Document) Has(key string) bool {
-	d.load()
 	if d.keys != nil {
 		_, ok := d.keys[key]
 		return ok
@@ -304,6 +336,10 @@ func (d *Document) Has(key string) bool {
 		if f.key == key {
 			return true
 		}
+	}
+	if d.fields == nil && d.lazy() {
+		d.decodeLazy()
+		return d.Has(key)
 	}
 	return false
 }
@@ -324,7 +360,6 @@ func (d *Document) Get(key string) (any, error) {
 	if d == nil {
 		return nil, &keyNotFoundError{key: key, nilDocument: true}
 	}
-	d.load()
 
 	if d.isKeyDuplicate(key) {
 		panic(fmt.Sprintf("types.Document.Get: key is duplicated: %s", key))
@@ -334,6 +369,12 @@ func (d *Document) Get(key string) (any, error) {
 		if field.key == key {
 			return field.value, nil
 		}
+	}
+
+	// A lazy document has no fields until decoded, so only a miss checks.
+	if d.fields == nil && d.lazy() {
+		d.decodeLazy()
+		return d.Get(key)
 	}
 
 	return nil, &keyNotFoundError{key: key}
@@ -505,8 +546,8 @@ func (d *Document) SortFieldsByKey() {
 	})
 }
 
+// isKeyDuplicate expects d loaded.
 func (d *Document) isKeyDuplicate(targetKey string) bool {
-	d.load()
 	if d.keys != nil {
 		return d.keys[targetKey] > 1
 	}

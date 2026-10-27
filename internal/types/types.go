@@ -127,8 +127,8 @@ func isScalar(value any) bool {
 func deepCopy(value any) any {
 	switch value := value.(type) {
 	case *Document:
-		if value.lazy {
-			copied := NewLazyDocument(bytes.Clone(value.raw))
+		if value.lazy() {
+			copied := NewLazyDocument(bytes.Clone(value.extra.raw))
 			copied.recordID = value.recordID
 			return copied
 		}

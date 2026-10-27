@@ -22,8 +22,8 @@ import (
 
 // BSONSize returns the length of the document's BSON encoding without encoding it.
 func (d *Document) BSONSize() int {
-	if d.raw != nil {
-		return len(d.raw)
+	if raw := d.rawBSON(); raw != nil {
+		return len(raw)
 	}
 	size := 5
 	for _, f := range d.fields {
