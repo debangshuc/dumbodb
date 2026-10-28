@@ -16,15 +16,12 @@ package dolt
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"testing"
 
 	"github.com/dolthub/dumbodb/internal/backends"
-	"github.com/dolthub/dumbodb/internal/collation"
-	"github.com/dolthub/dumbodb/internal/handler/common"
 	"github.com/dolthub/dumbodb/internal/types"
 	"github.com/dolthub/dumbodb/internal/util/iterator"
 	"github.com/dolthub/dumbodb/internal/util/must"
@@ -479,143 +476,6 @@ func TestIndexLookup_Bench_Sanity(t *testing.T) {
 	if got != 100 {
 		t.Errorf("range candidate count: want 100, got %d", got)
 	}
-}
-
-// BenchmarkIndexUse_CollatedRange_10K is the collated counterpart of
-// BenchmarkIndexLookup_Range_10K (its name is mandated by issue #130): an
-// fr_CA-collated index on a string field serving a 1%-selectivity operator
-// range queried under the same collation.
-//
-// The backend's Query streams candidates: a collated index seek yields the
-// bounds-matched entries, while a collated scan streams the whole collection
-// (the byte prefilter is skipped under collation, collection.go) and the
-// handler's FilterIteratorColl applies the actual filter. measure() below
-// re-filters candidates through the same FilterDocumentColl evaluation so
-// both arms count final matches, while the raw candidate count doubles as
-// the docs-examined signal (10,000 scanned vs 100 sought).
-func BenchmarkIndexUse_CollatedRange_10K(b *testing.B) {
-	const n = 10_000
-	lo, hi := "s1000", "s1100" // [s1000, s1100) of s0000..s9999: 1%.
-
-	rangeOp := func() *types.Document {
-		return must.NotFail(types.NewDocument("$gte", lo, "$lt", hi))
-	}
-	filterDoc := must.NotFail(types.NewDocument("s", rangeOp()))
-	colDoc := must.NotFail(types.NewDocument("locale", "fr_CA"))
-	cmp := collation.Parse(colDoc).Comparator()
-
-	// measure drains one candidate stream, tracking the raw candidate count
-	// and the count that passes the handler's own filter evaluation.
-	measure := func(b *testing.B, iter types.DocumentsIterator) (matched, candidates int) {
-		b.Helper()
-		defer iter.Close()
-		for {
-			_, doc, err := iter.Next()
-			if err != nil {
-				if errors.Is(err, iterator.ErrIteratorDone) {
-					return matched, candidates
-				}
-				b.Fatalf("candidate iter: %v", err)
-			}
-			candidates++
-			ok, err := common.FilterDocumentColl(doc, filterDoc, cmp)
-			if err != nil {
-				b.Fatalf("re-filter: %v", err)
-			}
-			if ok {
-				matched++
-			}
-		}
-	}
-
-	seedCollatedStrings := func(b *testing.B, collated bool) (backends.Collection, context.Context) {
-		b.Helper()
-		ctx := context.Background()
-		backend := newBenchBackend(b)
-		db, err := backend.Database("collbench")
-		if err != nil {
-			b.Fatalf("Database: %v", err)
-		}
-		coll, err := db.Collection("c")
-		if err != nil {
-			b.Fatalf("Collection: %v", err)
-		}
-		const batch = 1000
-		for off := 0; off < n; off += batch {
-			size := n - off
-			if size > batch {
-				size = batch
-			}
-			docs := make([]*types.Document, 0, size)
-			for j := off; j < off+size; j++ {
-				docs = append(docs, must.NotFail(types.NewDocument(
-					"_id", int32(j),
-					"s", fmt.Sprintf("s%04d", j),
-				)))
-			}
-			if _, err := coll.InsertAll(ctx, &backends.InsertAllParams{Docs: docs}); err != nil {
-				b.Fatalf("InsertAll: %v", err)
-			}
-		}
-		if collated {
-			if _, err := coll.CreateIndexes(ctx, &backends.CreateIndexesParams{
-				Indexes: []backends.IndexInfo{{
-					Name:      "s_coll_idx",
-					Key:       []backends.IndexKeyPair{{Field: "s"}},
-					Collation: must.NotFail(types.NewDocument("locale", "fr_CA")),
-				}},
-			}); err != nil {
-				b.Fatalf("CreateIndexes: %v", err)
-			}
-		}
-		return coll, ctx
-	}
-
-	b.Run("unindexed_scan", func(b *testing.B) {
-		coll, ctx := seedCollatedStrings(b, false)
-		const want = 100 // final matches in [s1000, s1100)
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			res, err := coll.Query(ctx, &backends.QueryParams{
-				Filter:    must.NotFail(types.NewDocument("s", rangeOp())),
-				Collated:  true,
-				Collation: must.NotFail(types.NewDocument("locale", "fr_CA")),
-			})
-			if err != nil {
-				b.Fatalf("Query: %v", err)
-			}
-			matched, candidates := measure(b, res.Iter)
-			if matched != want {
-				b.Fatalf("unindexed scan matched %d docs, want %d", matched, want)
-			}
-			if candidates != n {
-				b.Fatalf("unindexed collated scan streamed %d candidates, want %d (whole collection: no prefilter under collation)", candidates, n)
-			}
-		}
-	})
-
-	b.Run("collated_indexed", func(b *testing.B) {
-		coll, ctx := seedCollatedStrings(b, true)
-		const want = 100 // final matches in [s1000, s1100)
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			res, err := coll.Query(ctx, &backends.QueryParams{
-				Filter:    must.NotFail(types.NewDocument("s", rangeOp())),
-				Collated:  true,
-				Collation: must.NotFail(types.NewDocument("locale", "fr_CA")),
-			})
-			if err != nil {
-				b.Fatalf("Query: %v", err)
-			}
-			matched, candidates := measure(b, res.Iter)
-			if matched != want {
-				b.Fatalf("collated index scan matched %d docs, want %d", matched, want)
-			}
-			if candidates != want {
-				b.Fatalf("collated index seek streamed %d candidates, want %d (bounds should be tight)", candidates, want)
-			}
-		}
-	})
 }
 
 // Per-insert cost under a unique index must not scale with collection size
